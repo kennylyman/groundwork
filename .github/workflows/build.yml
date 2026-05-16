@@ -38,20 +38,20 @@ jobs:
       - name: Build Windows executable
         run: pyinstaller agent/groundwork.spec --clean --distpath dist
 
-      - name: Verify build
-        run: dir dist\Groundwork\
+      - name: Show dist contents
+        run: dir dist /s
 
       - name: Upload executable as artifact
         uses: actions/upload-artifact@v4
         with:
           name: Groundwork-Windows-exe
-          path: dist/Groundwork/
+          path: dist/
 
       - name: Create Release
         uses: softprops/action-gh-release@v1
         with:
           tag_name: latest
           name: Groundwork Agent — Latest
-          files: dist/Groundwork/Groundwork.exe
+          files: dist/**/*.exe
           prerelease: false
           token: ${{ secrets.GITHUB_TOKEN }}
