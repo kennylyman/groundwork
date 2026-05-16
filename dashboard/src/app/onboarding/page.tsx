@@ -3,13 +3,15 @@
 import { useState, useEffect } from 'react'
 import { supabase } from '@/lib/supabase'
 import { useRouter } from 'next/navigation'
-import { Plus, Download, Check, Users, Activity } from 'lucide-react'
+import { Plus, Mail, Check, Users, Activity, CheckCircle, Clock } from 'lucide-react'
 
 type Employee = {
   id: string
   name: string
   role: string
+  email: string
   install_token: string
+  invite_sent_at: string | null
 }
 
 const ROLES = [
@@ -30,7 +32,9 @@ export default function OnboardingPage() {
   const [employees, setEmployees] = useState<Employee[]>([])
   const [loading, setLoading] = useState(true)
   const [adding, setAdding] = useState(false)
-  const [newEmployee, setNewEmployee] = useState({ name: '', role: '' })
+  const [sending, setSending] = useState<string | null>(null)
+  const [sent, setSent] = useState<string[]>([])
+  const [newEmployee, setNewEmployee] = useState({ name: '', role: '', email: '' })
   const [showForm, setShowForm] = useState(false)
 
   useEffect(() => {
@@ -39,10 +43,7 @@ export default function OnboardingPage() {
 
   async function loadData() {
     const { data: { user } } = await supabase.auth.getUser()
-    if (!user) {
-      router.push('/login')
-      return
-    }
+    if (!user) { router.push('/login'); return }
 
     const { data: biz } = await supabase
       .from('businesses')
@@ -50,10 +51,7 @@ export default function OnboardingPage() {
       .eq('owner_id', user.id)
       .single()
 
-    if (!biz) {
-      router.push('/signup')
-      return
-    }
+    if (!biz) { router.push('/signup'); return }
 
     setBusiness(biz)
 
@@ -64,11 +62,12 @@ export default function OnboardingPage() {
       .order('created_at')
 
     setEmployees(emps || [])
+    setSent((emps || []).filter((e: Employee) => e.invite_sent_at).map((e: Employee) => e.id))
     setLoading(false)
   }
 
   async function addEmployee() {
-    if (!newEmployee.name || !newEmployee.role) return
+    if (!newEmployee.name || !newEmployee.role || !newEmployee.email) return
     setAdding(true)
 
     const { data, error } = await supabase
@@ -77,6 +76,7 @@ export default function OnboardingPage() {
         business_id: business.id,
         name: newEmployee.name,
         role: newEmployee.role,
+        email: newEmployee.email,
         is_active: true,
         install_token: crypto.randomUUID(),
       })
@@ -85,20 +85,29 @@ export default function OnboardingPage() {
 
     if (!error && data) {
       setEmployees(e => [...e, data])
-      setNewEmployee({ name: '', role: '' })
+      setNewEmployee({ name: '', role: '', email: '' })
       setShowForm(false)
+      await sendInvite(data.id)
     }
     setAdding(false)
   }
 
-  function getInstallLink(employee: Employee) {
-    // In production this would be a real download link
-    // For now generates a unique install URL
-    return `https://groundwork-green-phi.vercel.app/install/${employee.install_token}`
-  }
-
-  function copyInstallLink(employee: Employee) {
-    navigator.clipboard.writeText(getInstallLink(employee))
+  async function sendInvite(employeeId: string) {
+    setSending(employeeId)
+    try {
+      const res = await fetch('/api/send-invite', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ employeeId }),
+      })
+      if (res.ok) {
+        setSent(s => [...s, employeeId])
+      }
+    } catch (err) {
+      console.error('Failed to send invite:', err)
+    } finally {
+      setSending(null)
+    }
   }
 
   if (loading) {
@@ -111,7 +120,6 @@ export default function OnboardingPage() {
 
   return (
     <div className="min-h-screen bg-gray-50">
-      {/* Header */}
       <div className="bg-white border-b border-gray-200 px-8 py-4">
         <div className="max-w-3xl mx-auto flex items-center justify-between">
           <div className="flex items-center gap-2">
@@ -120,39 +128,30 @@ export default function OnboardingPage() {
             </div>
             <span className="text-sm font-semibold text-gray-900">Groundwork</span>
           </div>
-          <button
-            onClick={() => router.push('/')}
-            className="text-xs text-gray-500 hover:text-gray-900 transition-colors"
-          >
+          <button onClick={() => router.push('/')} className="text-xs text-gray-500 hover:text-gray-900 transition-colors">
             Go to dashboard →
           </button>
         </div>
       </div>
 
       <div className="max-w-3xl mx-auto px-8 py-12">
-        {/* Welcome */}
         <div className="mb-10">
-          <h1 className="text-2xl font-semibold text-gray-900">
-            Set up {business?.name}
-          </h1>
+          <h1 className="text-2xl font-semibold text-gray-900">Set up {business?.name}</h1>
           <p className="text-sm text-gray-500 mt-1">
-            Add your team members. Each person gets a unique installer that silently captures their workflows.
+            Add your team. Each person gets an email with their personal installer link.
           </p>
         </div>
 
-        {/* How it works */}
         <div className="bg-gray-900 rounded-2xl p-6 mb-8 text-white">
           <h2 className="text-sm font-semibold mb-4">How it works</h2>
           <div className="grid grid-cols-3 gap-4">
             {[
-              { step: '1', title: 'Add employees', desc: 'Enter their name and role below' },
-              { step: '2', title: 'Send installer', desc: 'Each person gets a unique download link' },
-              { step: '3', title: 'Watch insights flow', desc: 'Data appears in your dashboard in real time' },
+              { step: '1', title: 'Add employees', desc: 'Enter name, role, and email' },
+              { step: '2', title: 'We send the invite', desc: 'Each person gets a personal installer link' },
+              { step: '3', title: 'Insights flow in', desc: 'Data appears in your dashboard in real time' },
             ].map(s => (
               <div key={s.step} className="flex gap-3">
-                <div className="w-5 h-5 rounded-full bg-white/20 flex items-center justify-center text-xs font-medium shrink-0 mt-0.5">
-                  {s.step}
-                </div>
+                <div className="w-5 h-5 rounded-full bg-white/20 flex items-center justify-center text-xs font-medium shrink-0 mt-0.5">{s.step}</div>
                 <div>
                   <p className="text-xs font-medium">{s.title}</p>
                   <p className="text-xs text-white/60 mt-0.5">{s.desc}</p>
@@ -162,15 +161,12 @@ export default function OnboardingPage() {
           </div>
         </div>
 
-        {/* Employee list */}
         <div className="bg-white rounded-2xl border border-gray-200">
           <div className="px-6 py-4 border-b border-gray-100 flex items-center justify-between">
             <div className="flex items-center gap-2">
               <Users className="w-4 h-4 text-gray-400" />
               <h2 className="text-sm font-semibold text-gray-900">Team members</h2>
-              <span className="text-xs bg-gray-100 text-gray-500 px-2 py-0.5 rounded-full">
-                {employees.length}
-              </span>
+              <span className="text-xs bg-gray-100 text-gray-500 px-2 py-0.5 rounded-full">{employees.length}</span>
             </div>
             <button
               onClick={() => setShowForm(true)}
@@ -181,44 +177,48 @@ export default function OnboardingPage() {
             </button>
           </div>
 
-          {/* Add form */}
           {showForm && (
             <div className="px-6 py-4 border-b border-gray-100 bg-gray-50">
-              <div className="flex gap-3">
+              <div className="grid grid-cols-2 gap-3 mb-3">
                 <input
                   type="text"
                   placeholder="Full name"
                   value={newEmployee.name}
                   onChange={e => setNewEmployee(n => ({ ...n, name: e.target.value }))}
-                  className="flex-1 px-3 py-2 text-sm border border-gray-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-gray-900 bg-white"
+                  className="px-3 py-2 text-sm border border-gray-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-gray-900 bg-white"
                   autoFocus
                 />
                 <select
                   value={newEmployee.role}
                   onChange={e => setNewEmployee(n => ({ ...n, role: e.target.value }))}
-                  className="flex-1 px-3 py-2 text-sm border border-gray-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-gray-900 bg-white"
+                  className="px-3 py-2 text-sm border border-gray-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-gray-900 bg-white"
                 >
                   <option value="">Select role</option>
                   {ROLES.map(r => <option key={r} value={r}>{r}</option>)}
                 </select>
+              </div>
+              <div className="flex gap-3">
+                <input
+                  type="email"
+                  placeholder="Work email"
+                  value={newEmployee.email}
+                  onChange={e => setNewEmployee(n => ({ ...n, email: e.target.value }))}
+                  className="flex-1 px-3 py-2 text-sm border border-gray-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-gray-900 bg-white"
+                />
                 <button
                   onClick={addEmployee}
-                  disabled={adding || !newEmployee.name || !newEmployee.role}
+                  disabled={adding || !newEmployee.name || !newEmployee.role || !newEmployee.email}
                   className="px-4 py-2 text-sm font-medium bg-gray-900 text-white rounded-lg hover:bg-gray-700 disabled:opacity-50 transition-colors"
                 >
-                  {adding ? 'Adding...' : 'Add'}
+                  {adding ? 'Adding...' : 'Add & send invite'}
                 </button>
-                <button
-                  onClick={() => setShowForm(false)}
-                  className="px-3 py-2 text-sm text-gray-500 hover:text-gray-900 transition-colors"
-                >
+                <button onClick={() => setShowForm(false)} className="px-3 py-2 text-sm text-gray-500 hover:text-gray-900">
                   Cancel
                 </button>
               </div>
             </div>
           )}
 
-          {/* Employee rows */}
           <div className="divide-y divide-gray-50">
             {employees.map(emp => (
               <div key={emp.id} className="px-6 py-4 flex items-center justify-between">
@@ -228,17 +228,28 @@ export default function OnboardingPage() {
                   </div>
                   <div>
                     <p className="text-sm font-medium text-gray-900">{emp.name}</p>
-                    <p className="text-xs text-gray-500">{emp.role}</p>
+                    <p className="text-xs text-gray-500">{emp.role} · {emp.email}</p>
                   </div>
                 </div>
                 <div className="flex items-center gap-2">
-                  <button
-                    onClick={() => copyInstallLink(emp)}
-                    className="flex items-center gap-1.5 text-xs font-medium text-gray-600 border border-gray-200 px-3 py-1.5 rounded-lg hover:bg-gray-50 transition-colors"
-                  >
-                    <Download className="w-3.5 h-3.5" />
-                    Copy install link
-                  </button>
+                  {sent.includes(emp.id) ? (
+                    <div className="flex items-center gap-1.5 text-xs text-green-600 bg-green-50 border border-green-100 px-3 py-1.5 rounded-lg">
+                      <CheckCircle className="w-3.5 h-3.5" />
+                      Invite sent
+                    </div>
+                  ) : (
+                    <button
+                      onClick={() => sendInvite(emp.id)}
+                      disabled={sending === emp.id}
+                      className="flex items-center gap-1.5 text-xs font-medium text-gray-600 border border-gray-200 px-3 py-1.5 rounded-lg hover:bg-gray-50 transition-colors disabled:opacity-50"
+                    >
+                      {sending === emp.id ? (
+                        <><Clock className="w-3.5 h-3.5" /> Sending...</>
+                      ) : (
+                        <><Mail className="w-3.5 h-3.5" /> Send invite</>
+                      )}
+                    </button>
+                  )}
                 </div>
               </div>
             ))}
@@ -264,10 +275,6 @@ export default function OnboardingPage() {
             </div>
           )}
         </div>
-
-        <p className="text-center text-xs text-gray-400 mt-6">
-          You can add more employees anytime from your dashboard settings
-        </p>
       </div>
     </div>
   )
