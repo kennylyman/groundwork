@@ -10,34 +10,22 @@ import {
   Sparkles,
   Loader2,
   AlertCircle,
-  BookOpen,
-  Bell,
-  ListChecks,
-  Layers,
-  Clock,
-  Calendar,
-  User,
-  Tag,
-  BarChart3,
+  TrendingUp,
 } from 'lucide-react'
 import { supabase, Employee } from '@/lib/supabase'
-
-type Sop = {
-  title: string
-  overview: string
-  trigger: string
-  steps: string[]
-  software: string[]
-  time_estimate: string
-}
-
-type SopMeta = {
-  employee: string
-  category: string
-  capture_count: number
-  generated_at: string
-  model: string
-}
+import {
+  SopDocument,
+  sopToPlainText,
+  type Sop,
+  type SopMeta,
+} from '@/components/SopDocument'
+import {
+  IntelligenceReport,
+  intelligenceToPlainText,
+  type Analysis,
+  type Cost,
+  type IntelMeta,
+} from '@/components/IntelligenceReport'
 
 const CATEGORIES = [
   'Schedule Management',
@@ -53,16 +41,22 @@ const CATEGORIES = [
   'Meeting or Phone Call',
 ]
 
-// ---------- Page ----------
+type Tab = 'sop' | 'intelligence'
+
+type SopBundle = { sop: Sop; meta: SopMeta }
+type IntelBundle = { cost: Cost; analysis: Analysis; meta: IntelMeta }
 
 export default function SopBuilderPage() {
   const [employees, setEmployees] = useState<Employee[]>([])
   const [employeeId, setEmployeeId] = useState('')
   const [category, setCategory] = useState('')
   const [loading, setLoading] = useState(false)
-  const [sop, setSop] = useState<Sop | null>(null)
-  const [meta, setMeta] = useState<SopMeta | null>(null)
-  const [error, setError] = useState<string | null>(null)
+  const [sopBundle, setSopBundle] = useState<SopBundle | null>(null)
+  const [intelBundle, setIntelBundle] = useState<IntelBundle | null>(null)
+  const [sopError, setSopError] = useState<string | null>(null)
+  const [intelError, setIntelError] = useState<string | null>(null)
+  const [generalError, setGeneralError] = useState<string | null>(null)
+  const [activeTab, setActiveTab] = useState<Tab>('sop')
   const [copied, setCopied] = useState(false)
 
   useEffect(() => {
@@ -78,35 +72,56 @@ export default function SopBuilderPage() {
 
   async function generate() {
     if (!employeeId || !category) {
-      setError('Pick an employee and a category first.')
+      setGeneralError('Pick an employee and a category first.')
       return
     }
-    setError(null)
-    setSop(null)
-    setMeta(null)
+    setGeneralError(null)
+    setSopBundle(null)
+    setIntelBundle(null)
+    setSopError(null)
+    setIntelError(null)
     setLoading(true)
-    try {
-      const r = await fetch('/api/generate-sop', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ employeeId, category }),
-      })
-      const body = await r.json()
-      if (!r.ok) {
-        throw new Error(body.detail || body.error || `HTTP ${r.status}`)
-      }
-      setSop(body.sop)
-      setMeta(body.meta)
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'unknown error')
-    } finally {
-      setLoading(false)
+
+    const payload = JSON.stringify({ employeeId, category })
+    const init: RequestInit = {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: payload,
     }
+
+    // Fire both in parallel. Use allSettled so a failure on one doesn't
+    // kill the other — partial results are still useful.
+    const [sopRes, intelRes] = await Promise.allSettled([
+      fetch('/api/generate-sop', init).then(async (r) => {
+        const body = await r.json()
+        if (!r.ok) throw new Error(body.detail || body.error || `HTTP ${r.status}`)
+        return body as SopBundle
+      }),
+      fetch('/api/generate-intelligence', init).then(async (r) => {
+        const body = await r.json()
+        if (!r.ok) throw new Error(body.detail || body.error || `HTTP ${r.status}`)
+        return body as IntelBundle
+      }),
+    ])
+
+    if (sopRes.status === 'fulfilled') setSopBundle(sopRes.value)
+    else setSopError(sopRes.reason instanceof Error ? sopRes.reason.message : 'unknown error')
+
+    if (intelRes.status === 'fulfilled') setIntelBundle(intelRes.value)
+    else setIntelError(intelRes.reason instanceof Error ? intelRes.reason.message : 'unknown error')
+
+    setLoading(false)
   }
 
-  function copyAsText() {
-    if (!sop) return
-    navigator.clipboard.writeText(sopToPlainText(sop, meta)).then(() => {
+  function copyActiveTab() {
+    let text: string | null = null
+    if (activeTab === 'sop' && sopBundle) {
+      text = sopToPlainText(sopBundle.sop, sopBundle.meta)
+    } else if (activeTab === 'intelligence' && intelBundle) {
+      text = intelligenceToPlainText(intelBundle.cost, intelBundle.analysis, intelBundle.meta)
+    }
+    if (!text) return
+    navigator.clipboard.writeText(text).then(() => {
       setCopied(true)
       setTimeout(() => setCopied(false), 1500)
     })
@@ -117,6 +132,10 @@ export default function SopBuilderPage() {
   }
 
   const employee = employees.find((e) => e.id === employeeId)
+  const hasAnyResult = !!sopBundle || !!intelBundle
+  const activeHasContent =
+    (activeTab === 'sop' && !!sopBundle) || (activeTab === 'intelligence' && !!intelBundle)
+  const activeErr = activeTab === 'sop' ? sopError : intelError
 
   return (
     <div className="min-h-screen bg-gray-50">
@@ -142,11 +161,15 @@ export default function SopBuilderPage() {
 
       <div className="max-w-5xl mx-auto px-8 py-8 pb-32">
         {/* Generation card — hidden in print */}
-        <div className="bg-white rounded-2xl border border-gray-200 p-6 mb-8 print:hidden">
-          <h2 className="text-base font-semibold text-gray-900 mb-1">Generate a new SOP</h2>
+        <div className="bg-white rounded-2xl border border-gray-200 p-6 mb-6 print:hidden">
+          <h2 className="text-base font-semibold text-gray-900 mb-1">
+            Generate a new document
+          </h2>
           <p className="text-xs text-gray-500 mb-5">
             Pick an employee and a category. We&rsquo;ll pull their last 7 days of
-            captures and synthesize a Standard Operating Procedure.
+            captures and produce both a frontline <strong>SOP</strong> and an
+            owner-facing <strong>Process Intelligence Report</strong>. Switch between
+            them with the tabs once they&rsquo;re ready.
           </p>
 
           <div className="grid grid-cols-2 gap-4 mb-5">
@@ -195,47 +218,76 @@ export default function SopBuilderPage() {
             {loading ? (
               <>
                 <Loader2 className="w-4 h-4 animate-spin" />
-                Generating SOP…
+                Generating both views…
               </>
             ) : (
               <>
                 <Sparkles className="w-4 h-4" />
-                Generate SOP
+                Generate
               </>
             )}
           </button>
 
-          {error && (
+          {generalError && (
             <div className="mt-4 flex items-start gap-2 px-3 py-2 bg-red-50 border border-red-100 rounded-lg">
               <AlertCircle className="w-4 h-4 text-red-500 mt-0.5 shrink-0" />
-              <p className="text-xs text-red-700">{error}</p>
+              <p className="text-xs text-red-700">{generalError}</p>
             </div>
           )}
         </div>
 
-        {/* SOP document / skeleton / empty state */}
-        {loading && <SopSkeleton />}
-        {!loading && sop && meta && <SopDocument sop={sop} meta={meta} employee={employee} />}
-        {!loading && !sop && !error && <EmptyState />}
+        {/* Tab switcher — shown once we have at least one result or are loading */}
+        {(loading || hasAnyResult) && (
+          <TabSwitcher
+            active={activeTab}
+            onChange={setActiveTab}
+            sopReady={!!sopBundle}
+            sopError={!!sopError}
+            intelReady={!!intelBundle}
+            intelError={!!intelError}
+            loading={loading}
+          />
+        )}
+
+        {/* Active tab content */}
+        {loading && <Skeleton tab={activeTab} />}
+
+        {!loading && activeHasContent && activeTab === 'sop' && sopBundle && (
+          <SopDocument sop={sopBundle.sop} meta={sopBundle.meta} employee={employee} />
+        )}
+
+        {!loading && activeHasContent && activeTab === 'intelligence' && intelBundle && (
+          <IntelligenceReport
+            cost={intelBundle.cost}
+            analysis={intelBundle.analysis}
+            meta={intelBundle.meta}
+          />
+        )}
+
+        {!loading && !activeHasContent && activeErr && (
+          <TabErrorState tab={activeTab} message={activeErr} onRetry={generate} />
+        )}
+
+        {!loading && !hasAnyResult && !generalError && !sopError && !intelError && <EmptyState />}
       </div>
 
-      {/* Sticky action bar — visible only when a SOP is rendered, hidden in print */}
-      {sop && !loading && (
+      {/* Sticky action bar — only when the active tab has renderable content */}
+      {!loading && activeHasContent && (
         <div className="fixed bottom-0 left-0 right-0 bg-white/80 backdrop-blur-md border-t border-gray-200 px-8 py-3 print:hidden">
           <div className="max-w-5xl mx-auto flex items-center justify-between">
             <div className="text-xs text-gray-500">
-              {meta && (
-                <>
-                  <span className="font-medium text-gray-700">{meta.employee}</span>
-                  {' · '}
-                  {meta.category}
-                </>
-              )}
+              <span className="font-medium text-gray-700">
+                {sopBundle?.meta.employee ?? intelBundle?.meta.employee}
+              </span>
+              {' · '}
+              {sopBundle?.meta.category ?? intelBundle?.meta.category}
+              {' · '}
+              <span className="text-gray-400">{activeTab === 'sop' ? 'SOP' : 'Intelligence'}</span>
             </div>
             <div className="flex items-center gap-2">
               <button
                 type="button"
-                onClick={copyAsText}
+                onClick={copyActiveTab}
                 className="flex items-center gap-1.5 px-3.5 py-2 text-xs font-medium text-gray-700 bg-gray-100 rounded-lg hover:bg-gray-200 transition-colors"
               >
                 <Copy className="w-3.5 h-3.5" />
@@ -259,216 +311,111 @@ export default function SopBuilderPage() {
         @media print {
           body { background: white !important; }
           .print\\:hidden { display: none !important; }
-          #sop-document {
+          #sop-document, #intelligence-report {
             box-shadow: none !important;
-            border: 0 !important;
-            border-radius: 0 !important;
-            padding: 0 !important;
-            max-width: 100% !important;
           }
-          .sop-section { break-inside: avoid; }
+          .sop-section, .report-card { break-inside: avoid; }
         }
       `}</style>
     </div>
   )
 }
 
-// ---------- SOP document ----------
+// ---------- Tab switcher ----------
 
-function SopDocument({
-  sop,
-  meta,
-  employee,
+function TabSwitcher({
+  active,
+  onChange,
+  sopReady,
+  sopError,
+  intelReady,
+  intelError,
+  loading,
 }: {
-  sop: Sop
-  meta: SopMeta
-  employee?: Employee
+  active: Tab
+  onChange: (t: Tab) => void
+  sopReady: boolean
+  sopError: boolean
+  intelReady: boolean
+  intelError: boolean
+  loading: boolean
 }) {
   return (
-    <div
-      id="sop-document"
-      className="bg-white rounded-2xl border border-gray-200 shadow-sm p-10 md:p-14"
-    >
-      {/* Title block */}
-      <header className="mb-8 pb-8 border-b border-gray-100">
-        <p className="text-[11px] uppercase tracking-[0.18em] text-gray-400 font-medium mb-3">
-          Standard Operating Procedure
-        </p>
-        <h1 className="text-3xl font-semibold text-gray-900 leading-tight tracking-tight">
-          {sop.title}
-        </h1>
-
-        <MetadataRow meta={meta} employee={employee} />
-      </header>
-
-      {/* Sections */}
-      <div className="space-y-6">
-        <SectionCard label="Overview" icon={BookOpen} accent="indigo">
-          <p className="text-[15px] text-gray-700 leading-relaxed">{sop.overview}</p>
-        </SectionCard>
-
-        <SectionCard label="Trigger" icon={Bell} accent="amber">
-          <p className="text-[15px] text-gray-700 leading-relaxed">{sop.trigger}</p>
-        </SectionCard>
-
-        <SectionCard label="Step-by-step process" icon={ListChecks} accent="slate">
-          <StepTimeline steps={sop.steps} />
-        </SectionCard>
-
-        <SectionCard label="Software used" icon={Layers} accent="blue">
-          <div className="flex flex-wrap gap-2">
-            {sop.software.map((s) => (
-              <SoftwarePill key={s} name={s} />
-            ))}
-          </div>
-        </SectionCard>
-
-        <SectionCard label="Time estimate" icon={Clock} accent="emerald">
-          <p className="text-[15px] text-gray-700 leading-relaxed font-medium">
-            {sop.time_estimate}
-          </p>
-        </SectionCard>
-      </div>
-    </div>
-  )
-}
-
-// ---------- Metadata row ----------
-
-function MetadataRow({ meta, employee }: { meta: SopMeta; employee?: Employee }) {
-  return (
-    <div className="flex flex-wrap items-center gap-x-5 gap-y-2 mt-5">
-      <MetaPill icon={User} label={meta.employee} sublabel={employee?.role || undefined} />
-      <MetaPill icon={Tag} label={meta.category} />
-      <MetaPill icon={BarChart3} label={`${meta.capture_count} captures`} />
-      <MetaPill
-        icon={Calendar}
-        label={new Date(meta.generated_at).toLocaleDateString(undefined, {
-          month: 'long',
-          day: 'numeric',
-          year: 'numeric',
-        })}
+    <div className="mb-6 flex items-center gap-1 p-1 bg-gray-100 rounded-xl w-fit print:hidden">
+      <TabButton
+        active={active === 'sop'}
+        onClick={() => onChange('sop')}
+        icon={<FileText className="w-3.5 h-3.5" />}
+        label="SOP"
+        sublabel="Frontline"
+        ready={sopReady}
+        errored={sopError}
+        loading={loading}
+      />
+      <TabButton
+        active={active === 'intelligence'}
+        onClick={() => onChange('intelligence')}
+        icon={<TrendingUp className="w-3.5 h-3.5" />}
+        label="Intelligence"
+        sublabel="Owner"
+        ready={intelReady}
+        errored={intelError}
+        loading={loading}
       />
     </div>
   )
 }
 
-function MetaPill({
-  icon: Icon,
+function TabButton({
+  active,
+  onClick,
+  icon,
   label,
   sublabel,
+  ready,
+  errored,
+  loading,
 }: {
-  icon: React.ComponentType<{ className?: string }>
+  active: boolean
+  onClick: () => void
+  icon: React.ReactNode
   label: string
-  sublabel?: string
+  sublabel: string
+  ready: boolean
+  errored: boolean
+  loading: boolean
 }) {
   return (
-    <div className="flex items-center gap-1.5 text-xs text-gray-500">
-      <Icon className="w-3.5 h-3.5 text-gray-400" />
-      <span className="text-gray-700 font-medium">{label}</span>
-      {sublabel && <span className="text-gray-400">· {sublabel}</span>}
-    </div>
-  )
-}
-
-// ---------- Section card ----------
-
-type Accent = 'indigo' | 'amber' | 'slate' | 'blue' | 'emerald' | 'purple'
-
-const ACCENT: Record<Accent, { pill: string; icon: string }> = {
-  indigo: { pill: 'bg-indigo-50 text-indigo-700 border-indigo-100', icon: 'text-indigo-500' },
-  amber: { pill: 'bg-amber-50 text-amber-700 border-amber-100', icon: 'text-amber-500' },
-  slate: { pill: 'bg-gray-100 text-gray-800 border-gray-200', icon: 'text-gray-700' },
-  blue: { pill: 'bg-blue-50 text-blue-700 border-blue-100', icon: 'text-blue-500' },
-  emerald: { pill: 'bg-emerald-50 text-emerald-700 border-emerald-100', icon: 'text-emerald-500' },
-  purple: { pill: 'bg-purple-50 text-purple-700 border-purple-100', icon: 'text-purple-500' },
-}
-
-function SectionCard({
-  label,
-  icon: Icon,
-  accent,
-  children,
-}: {
-  label: string
-  icon: React.ComponentType<{ className?: string }>
-  accent: Accent
-  children: React.ReactNode
-}) {
-  const colors = ACCENT[accent]
-  return (
-    <section className="sop-section bg-white rounded-xl border border-gray-100 p-6">
-      <div
-        className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full border ${colors.pill} mb-4`}
-      >
-        <Icon className={`w-3.5 h-3.5 ${colors.icon}`} />
-        <span className="text-[11px] uppercase tracking-wider font-semibold">{label}</span>
-      </div>
-      <div>{children}</div>
-    </section>
-  )
-}
-
-// ---------- Step timeline ----------
-
-function StepTimeline({ steps }: { steps: string[] }) {
-  return (
-    <ol className="relative list-none pl-0 m-0">
-      {steps.map((step, i) => {
-        const text = step.replace(/^\d+\.\s*/, '')
-        const isLast = i === steps.length - 1
-        return (
-          <li key={i} className="relative flex gap-4 pb-5 last:pb-0">
-            {!isLast && (
-              <span
-                aria-hidden
-                className="absolute left-[18px] top-9 -bottom-0 w-px bg-gray-200"
-              />
-            )}
-            <span className="relative z-10 shrink-0 w-9 h-9 rounded-full bg-gray-900 text-white text-sm font-semibold flex items-center justify-center shadow-sm">
-              {i + 1}
-            </span>
-            <p className="text-[15px] text-gray-700 leading-relaxed pt-1.5 flex-1">{text}</p>
-          </li>
-        )
-      })}
-    </ol>
-  )
-}
-
-// ---------- Software pill ----------
-
-// Deterministic color picker — same software name always renders the same color.
-const SOFTWARE_PALETTE = [
-  { bg: 'bg-blue-50', text: 'text-blue-700', dot: 'bg-blue-400', border: 'border-blue-100' },
-  { bg: 'bg-emerald-50', text: 'text-emerald-700', dot: 'bg-emerald-400', border: 'border-emerald-100' },
-  { bg: 'bg-purple-50', text: 'text-purple-700', dot: 'bg-purple-400', border: 'border-purple-100' },
-  { bg: 'bg-amber-50', text: 'text-amber-700', dot: 'bg-amber-400', border: 'border-amber-100' },
-  { bg: 'bg-pink-50', text: 'text-pink-700', dot: 'bg-pink-400', border: 'border-pink-100' },
-  { bg: 'bg-cyan-50', text: 'text-cyan-700', dot: 'bg-cyan-400', border: 'border-cyan-100' },
-  { bg: 'bg-rose-50', text: 'text-rose-700', dot: 'bg-rose-400', border: 'border-rose-100' },
-  { bg: 'bg-teal-50', text: 'text-teal-700', dot: 'bg-teal-400', border: 'border-teal-100' },
-]
-
-function pickPalette(key: string) {
-  let h = 0
-  for (let i = 0; i < key.length; i++) h = (h * 31 + key.charCodeAt(i)) >>> 0
-  return SOFTWARE_PALETTE[h % SOFTWARE_PALETTE.length]
-}
-
-function SoftwarePill({ name }: { name: string }) {
-  const p = pickPalette(name.toLowerCase())
-  return (
-    <div
-      className={`inline-flex items-center gap-2 px-3 py-1.5 rounded-lg border ${p.bg} ${p.border}`}
+    <button
+      type="button"
+      onClick={onClick}
+      className={`flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-medium transition-colors ${
+        active
+          ? 'bg-white text-gray-900 shadow-sm'
+          : 'text-gray-600 hover:text-gray-900'
+      }`}
     >
-      <span className={`w-2 h-2 rounded-full ${p.dot}`} />
-      <span className={`text-xs font-medium ${p.text}`}>{name}</span>
-    </div>
+      {icon}
+      <span>{label}</span>
+      <span className={`text-[10px] uppercase tracking-wider font-semibold ${active ? 'text-gray-400' : 'text-gray-400'}`}>
+        {sublabel}
+      </span>
+      {loading && !ready && !errored && (
+        <Loader2 className="w-3 h-3 animate-spin text-gray-400" />
+      )}
+      {errored && (
+        <span className="w-1.5 h-1.5 rounded-full bg-red-500" title="Failed to generate" />
+      )}
+    </button>
   )
 }
 
-// ---------- Loading skeleton ----------
+// ---------- Skeleton (varies by tab) ----------
+
+function Skeleton({ tab }: { tab: Tab }) {
+  if (tab === 'intelligence') return <IntelligenceSkeleton />
+  return <SopSkeleton />
+}
 
 function SopSkeleton() {
   return (
@@ -484,7 +431,7 @@ function SopSkeleton() {
         </div>
       </div>
       <div className="space-y-6">
-        {[1, 2, 3, 4, 5, 6].map((i) => (
+        {[1, 2, 3, 4, 5].map((i) => (
           <div key={i} className="bg-gray-50 rounded-xl p-6">
             <div className="h-5 w-32 bg-gray-200 rounded-full mb-4" />
             <div className="space-y-2">
@@ -495,6 +442,77 @@ function SopSkeleton() {
           </div>
         ))}
       </div>
+    </div>
+  )
+}
+
+function IntelligenceSkeleton() {
+  return (
+    <div className="space-y-6 animate-pulse">
+      <div className="bg-white rounded-2xl border border-gray-200 px-7 py-6">
+        <div className="h-3 w-44 bg-gray-200 rounded mb-3" />
+        <div className="h-8 w-2/3 bg-gray-200 rounded mb-2" />
+        <div className="h-3 w-1/2 bg-gray-200 rounded" />
+      </div>
+      <div className="bg-gray-900/90 rounded-2xl px-8 py-10">
+        <div className="h-3 w-24 bg-white/10 rounded mb-4" />
+        <div className="h-14 w-1/2 bg-white/10 rounded mb-4" />
+        <div className="h-3 w-2/3 bg-white/10 rounded mb-6" />
+        <div className="grid grid-cols-3 gap-4 max-w-lg">
+          {[1, 2, 3].map((i) => (
+            <div key={i} className="h-10 bg-white/10 rounded" />
+          ))}
+        </div>
+      </div>
+      <div className="bg-white rounded-2xl border-2 border-amber-200 p-6">
+        <div className="h-5 w-1/2 bg-gray-200 rounded mb-3" />
+        <div className="h-3 w-full bg-gray-200 rounded mb-1.5" />
+        <div className="h-3 w-11/12 bg-gray-200 rounded" />
+      </div>
+      <div className="grid md:grid-cols-2 gap-6">
+        <div className="bg-white rounded-2xl border border-gray-200 p-6">
+          <div className="h-4 w-40 bg-gray-200 rounded mb-4" />
+          <div className="h-3 w-full bg-gray-200 rounded mb-1.5" />
+          <div className="h-3 w-3/4 bg-gray-200 rounded" />
+        </div>
+        <div className="bg-white rounded-2xl border border-gray-200 p-6">
+          <div className="h-4 w-40 bg-gray-200 rounded mb-4" />
+          <div className="h-3 w-full bg-gray-200 rounded mb-1.5" />
+          <div className="h-3 w-3/4 bg-gray-200 rounded" />
+        </div>
+      </div>
+    </div>
+  )
+}
+
+// ---------- Per-tab error state ----------
+
+function TabErrorState({
+  tab,
+  message,
+  onRetry,
+}: {
+  tab: Tab
+  message: string
+  onRetry: () => void
+}) {
+  const label = tab === 'sop' ? 'SOP' : 'Intelligence Report'
+  return (
+    <div className="bg-white rounded-2xl border border-red-100 px-6 py-10 text-center">
+      <div className="w-12 h-12 mx-auto mb-3 rounded-full bg-red-50 flex items-center justify-center">
+        <AlertCircle className="w-5 h-5 text-red-500" />
+      </div>
+      <h3 className="text-sm font-semibold text-gray-900 mb-1">
+        {label} failed to generate
+      </h3>
+      <p className="text-xs text-gray-500 mb-4 max-w-md mx-auto leading-relaxed">{message}</p>
+      <button
+        type="button"
+        onClick={onRetry}
+        className="text-xs font-medium text-gray-700 bg-gray-100 px-3 py-1.5 rounded-lg hover:bg-gray-200 transition-colors"
+      >
+        Try again
+      </button>
     </div>
   )
 }
@@ -512,39 +530,12 @@ function EmptyState() {
           <Sparkles className="w-3.5 h-3.5 text-purple-500" />
         </div>
       </div>
-      <h3 className="text-base font-semibold text-gray-900 mb-1">No SOP yet</h3>
-      <p className="text-sm text-gray-500 max-w-xs mx-auto leading-relaxed">
-        Pick an employee and a category above, then hit Generate to build one from
+      <h3 className="text-base font-semibold text-gray-900 mb-1">No document yet</h3>
+      <p className="text-sm text-gray-500 max-w-sm mx-auto leading-relaxed">
+        Pick an employee and a category above, then hit Generate. We&rsquo;ll build
+        both a frontline SOP and an owner-facing Process Intelligence Report from
         their last 7 days of captures.
       </p>
     </div>
   )
-}
-
-// ---------- Plain-text export for the Copy button ----------
-
-function sopToPlainText(sop: Sop, meta: SopMeta | null): string {
-  const lines: string[] = []
-  lines.push('STANDARD OPERATING PROCEDURE')
-  lines.push(sop.title.toUpperCase())
-  if (meta)
-    lines.push(
-      `${meta.category} · ${meta.employee} · Generated ${new Date(meta.generated_at).toLocaleDateString()}`
-    )
-  lines.push('')
-  lines.push('OVERVIEW')
-  lines.push(sop.overview)
-  lines.push('')
-  lines.push('TRIGGER')
-  lines.push(sop.trigger)
-  lines.push('')
-  lines.push('STEP-BY-STEP PROCESS')
-  sop.steps.forEach((s, i) => lines.push(`${i + 1}. ${s.replace(/^\d+\.\s*/, '')}`))
-  lines.push('')
-  lines.push('SOFTWARE USED')
-  sop.software.forEach((s) => lines.push(`- ${s}`))
-  lines.push('')
-  lines.push('TIME ESTIMATE')
-  lines.push(sop.time_estimate)
-  return lines.join('\n')
 }
