@@ -1,10 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server'
-import { createClient } from '@supabase/supabase-js'
-
-const supabase = createClient(
-  process.env.NEXT_PUBLIC_SUPABASE_URL!,
-  process.env.SUPABASE_SERVICE_ROLE_KEY!
-)
+import { serverSupabase } from '@/lib/supabase'
 
 export async function GET(request: NextRequest) {
   const token = request.nextUrl.searchParams.get('token')?.trim()
@@ -12,6 +7,8 @@ export async function GET(request: NextRequest) {
   if (!token) {
     return NextResponse.json({ error: 'Missing token' }, { status: 400 })
   }
+
+  const supabase = serverSupabase()
 
   const { data: employee, error } = await supabase
     .from('employees')

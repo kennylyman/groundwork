@@ -1,16 +1,11 @@
-import { createClient } from '@supabase/supabase-js'
 import { notFound } from 'next/navigation'
+import { serverSupabase } from '@/lib/supabase'
 import { CopyButton } from './CopyButton'
-
-const supabase = createClient(
-  process.env.NEXT_PUBLIC_SUPABASE_URL!,
-  process.env.SUPABASE_SERVICE_ROLE_KEY!
-)
 
 export default async function InstallPage({ params }: { params: Promise<{ token: string }> }) {
   const { token } = await params
 
-  const { data: employee } = await supabase
+  const { data: employee } = await serverSupabase()
     .from('employees')
     .select('*, businesses(*)')
     .eq('install_token', token)

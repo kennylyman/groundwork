@@ -1,9 +1,32 @@
-import { createClient } from '@supabase/supabase-js'
+import { createClient, SupabaseClient } from '@supabase/supabase-js'
 
 const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL!
 const supabaseAnonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!
 
+// Anon client — safe for browser. RLS applies.
 export const supabase = createClient(supabaseUrl, supabaseAnonKey)
+
+// Service-role client — server-side only. Bypasses RLS.
+// Never import into a Client Component: the service-role key would do nothing
+// in the browser (it's not NEXT_PUBLIC_, so it's undefined client-side) but the
+// import path can mask intent. Default to this for route handlers and Server
+// Components that need privileged reads/writes.
+let _serverClient: SupabaseClient | null = null
+
+export function serverSupabase(): SupabaseClient {
+  if (typeof window !== 'undefined') {
+    throw new Error('serverSupabase() called in browser context — use the anon `supabase` export instead')
+  }
+  if (_serverClient) return _serverClient
+  const serviceRoleKey = process.env.SUPABASE_SERVICE_ROLE_KEY
+  if (!serviceRoleKey) {
+    throw new Error('SUPABASE_SERVICE_ROLE_KEY is not set')
+  }
+  _serverClient = createClient(supabaseUrl, serviceRoleKey, {
+    auth: { autoRefreshToken: false, persistSession: false },
+  })
+  return _serverClient
+}
 
 export type Business = {
   id: string
