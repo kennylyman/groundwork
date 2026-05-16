@@ -10,3 +10,4 @@ __pycache__/
 dist/
 .next/
 .vercel
+supabase/.temp/

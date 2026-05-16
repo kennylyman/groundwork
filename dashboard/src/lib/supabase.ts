@@ -43,6 +43,7 @@ export type Employee = {
   role: string
   install_token: string
   is_active: boolean
+  is_paused: boolean
   created_at: string
 }
 

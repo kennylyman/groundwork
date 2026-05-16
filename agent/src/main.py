@@ -19,6 +19,7 @@ ACTIVATION_URL = os.environ.get(
     'https://gwork.tech/api/activate',
 )
 CAPTURE_INTERVAL = 30
+PAUSE_CHECK_EVERY = 5  # captures between pause-state polls
 
 
 def log(msg: str) -> None:
@@ -297,6 +298,38 @@ def _ensure_startup_installed(config: dict) -> None:
         log(f"Could not persist startup_installed flag: {e}")
 
 
+def check_is_paused(config: dict) -> bool:
+    """
+    Poll Supabase for this employee's is_paused flag via the
+    `is_employee_paused` RPC (SECURITY DEFINER, callable with the anon key).
+    Returns False on any error — fail-open so a transient network blip
+    doesn't accidentally pause an employee.
+    """
+    supabase_url = config.get("supabase_url")
+    supabase_key = config.get("supabase_anon_key")
+    employee_id = config.get("employee_id")
+    if not supabase_url or not supabase_key or not employee_id:
+        return False
+    try:
+        response = requests.post(
+            f"{supabase_url}/rest/v1/rpc/is_employee_paused",
+            headers={
+                "apikey": supabase_key,
+                "Authorization": f"Bearer {supabase_key}",
+                "Content-Type": "application/json",
+            },
+            json={"employee_id": employee_id},
+            timeout=5,
+        )
+        if response.status_code != 200:
+            log(f"Pause check failed: HTTP {response.status_code} {response.text[:100]}")
+            return False
+        return bool(response.json())
+    except Exception as e:
+        log(f"Pause check error: {e}")
+        return False
+
+
 def run_capture_loop(config: dict) -> None:
     from capture import build_context_snapshot, start_input_listeners
     from classify import classify_snapshot
@@ -311,27 +344,42 @@ def run_capture_loop(config: dict) -> None:
     session_id = str(uuid.uuid4())
     log(f"Session: {session_id}")
     log(f"Capture interval: {CAPTURE_INTERVAL}s")
+    log(f"Pause check every {PAUSE_CHECK_EVERY} captures")
     log("Entering capture loop")
 
     recent_tasks: list[str] = []
+    capture_count = 0
+    is_paused = False
+
     while True:
         try:
-            snapshot = build_context_snapshot(previous_tasks=recent_tasks[-5:])
-            log(f"Snapshot taken: {snapshot.get('active_window')}")
+            # Re-poll pause state every PAUSE_CHECK_EVERY iterations (and at start).
+            if capture_count % PAUSE_CHECK_EVERY == 0:
+                new_paused = check_is_paused(config)
+                if new_paused != is_paused:
+                    log(f"Pause state changed: {is_paused} -> {new_paused}")
+                is_paused = new_paused
 
-            classification = classify_snapshot(snapshot, config['anthropic_api_key'])
-            task = classification.get('task', 'unknown')
-            confidence = classification.get('confidence', 0)
-            log(f"Classified: {task} ({confidence}%)")
-            recent_tasks.append(task)
+            if is_paused:
+                log("Paused — skipping capture cycle")
+            else:
+                snapshot = build_context_snapshot(previous_tasks=recent_tasks[-5:])
+                log(f"Snapshot taken: {snapshot.get('active_window')}")
 
-            ok = transmit_capture(snapshot, classification, session_id, config)
-            log("Transmitted" if ok else "Transmit failed — queued locally")
+                classification = classify_snapshot(snapshot, config['anthropic_api_key'])
+                task = classification.get('task', 'unknown')
+                confidence = classification.get('confidence', 0)
+                log(f"Classified: {task} ({confidence}%)")
+                recent_tasks.append(task)
+
+                ok = transmit_capture(snapshot, classification, session_id, config)
+                log("Transmitted" if ok else "Transmit failed — queued locally")
 
         except Exception as e:
             log(f"Capture cycle error: {e}")
             log(traceback.format_exc())
 
+        capture_count += 1
         log(f"Sleeping {CAPTURE_INTERVAL}s")
         time.sleep(CAPTURE_INTERVAL)
 

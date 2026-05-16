@@ -3,7 +3,8 @@
 import { useEffect, useState } from 'react'
 import { supabase, Employee, Capture } from '@/lib/supabase'
 import { Activity, Users, Zap, TrendingUp, Clock, AlertCircle } from 'lucide-react'
-import Link from 'next/link'
+import { useRouter } from 'next/navigation'
+import { PauseToggle, PausedBadge } from '@/components/PauseToggle'
 
 type EmployeeWithStatus = Employee & {
   latest_capture?: Capture
@@ -42,6 +43,7 @@ const CATEGORY_COLORS: Record<string, string> = {
 }
 
 export default function Dashboard() {
+  const router = useRouter()
   const [employees, setEmployees] = useState<EmployeeWithStatus[]>([])
   const [loading, setLoading] = useState(true)
   const [businessName, setBusinessName] = useState('Groundwork')
@@ -208,10 +210,15 @@ export default function Dashboard() {
           ) : (
             <div className="divide-y divide-gray-50">
               {employees.map((emp) => (
-                <Link
+                <div
                   key={emp.id}
-                  href={`/employee/${emp.id}`}
-                  className="flex items-center px-6 py-4 hover:bg-gray-50 transition-colors"
+                  role="link"
+                  tabIndex={0}
+                  onClick={() => router.push(`/employee/${emp.id}`)}
+                  onKeyDown={(e) => { if (e.key === 'Enter') router.push(`/employee/${emp.id}`) }}
+                  className={`flex items-center px-6 py-4 hover:bg-gray-50 transition-colors cursor-pointer ${
+                    emp.is_paused ? 'bg-amber-50/40' : ''
+                  }`}
                 >
                   {/* Status + Name */}
                   <div className="flex items-center gap-3 w-48">
@@ -221,8 +228,11 @@ export default function Dashboard() {
                       </div>
                       <div className={`absolute -bottom-0.5 -right-0.5 w-2.5 h-2.5 rounded-full border-2 border-white ${STATUS_COLORS[emp.status]}`} />
                     </div>
-                    <div>
-                      <p className="text-sm font-medium text-gray-900">{emp.name}</p>
+                    <div className="min-w-0">
+                      <div className="flex items-center gap-1.5">
+                        <p className="text-sm font-medium text-gray-900 truncate">{emp.name}</p>
+                        {emp.is_paused && <PausedBadge />}
+                      </div>
                       <p className="text-xs text-gray-500">{emp.role || 'Admin'}</p>
                     </div>
                   </div>
@@ -282,7 +292,21 @@ export default function Dashboard() {
                       </div>
                     )}
                   </div>
-                </Link>
+
+                  {/* Pause toggle */}
+                  <div className="w-24 flex justify-end pl-4">
+                    <PauseToggle
+                      employeeId={emp.id}
+                      initialPaused={emp.is_paused}
+                      size="sm"
+                      onChange={(paused) => {
+                        setEmployees((prev) =>
+                          prev.map((e) => (e.id === emp.id ? { ...e, is_paused: paused } : e))
+                        )
+                      }}
+                    />
+                  </div>
+                </div>
               ))}
             </div>
           )}

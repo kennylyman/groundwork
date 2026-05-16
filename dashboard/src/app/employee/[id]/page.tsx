@@ -5,6 +5,7 @@ import { supabase, Employee, Capture } from '@/lib/supabase'
 import { ArrowLeft, Zap, Clock, Activity, TrendingUp } from 'lucide-react'
 import Link from 'next/link'
 import { use } from 'react'
+import { PauseToggle, PausedBadge } from '@/components/PauseToggle'
 
 const AUTOMATION_COLORS: Record<string, string> = {
   high: 'text-red-500 bg-red-50 border-red-100',
@@ -97,11 +98,21 @@ export default function EmployeePage({ params }: { params: Promise<{ id: string 
                 {employee?.name.split(' ').map(n => n[0]).join('').slice(0, 2)}
               </div>
               <div>
-                <h1 className="text-sm font-semibold text-gray-900">{employee?.name}</h1>
+                <div className="flex items-center gap-2">
+                  <h1 className="text-sm font-semibold text-gray-900">{employee?.name}</h1>
+                  {employee?.is_paused && <PausedBadge />}
+                </div>
                 <p className="text-xs text-gray-500">{employee?.role || 'Admin'} · Today</p>
               </div>
             </div>
           </div>
+          {employee && (
+            <PauseToggle
+              employeeId={employee.id}
+              initialPaused={!!employee.is_paused}
+              onChange={(paused) => setEmployee((prev) => (prev ? { ...prev, is_paused: paused } : prev))}
+            />
+          )}
         </div>
       </div>
 
