@@ -10,7 +10,6 @@ export async function POST(request: NextRequest) {
   try {
     const { employeeId } = await request.json()
 
-    // Get employee and business details
     const { data: employee, error: empError } = await supabase
       .from('employees')
       .select('*, businesses(*)')
@@ -28,7 +27,6 @@ export async function POST(request: NextRequest) {
     const installUrl = `${process.env.NEXT_PUBLIC_APP_URL}/install/${employee.install_token}`
     const businessName = employee.businesses?.name || 'your company'
 
-    // Send email via Resend
     const response = await fetch('https://api.resend.com/emails', {
       method: 'POST',
       headers: {
@@ -36,7 +34,7 @@ export async function POST(request: NextRequest) {
         'Content-Type': 'application/json',
       },
       body: JSON.stringify({
-        from: 'Groundwork <onboarding@resend.dev>',
+        from: 'Groundwork <onboarding@gwork.tech>',
         to: employee.email,
         subject: `You've been invited to Groundwork — ${businessName}`,
         html: `
@@ -48,18 +46,9 @@ export async function POST(request: NextRequest) {
           </head>
           <body style="margin: 0; padding: 0; background: #f9fafb; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;">
             <div style="max-width: 480px; margin: 40px auto; padding: 0 20px;">
-              
-              <!-- Logo -->
               <div style="text-align: center; margin-bottom: 32px;">
-                <div style="display: inline-flex; align-items: center; gap: 8px;">
-                  <div style="width: 32px; height: 32px; background: #111827; border-radius: 8px; display: inline-flex; align-items: center; justify-content: center;">
-                    <span style="color: white; font-size: 16px;">⚡</span>
-                  </div>
-                  <span style="font-size: 18px; font-weight: 600; color: #111827;">Groundwork</span>
-                </div>
+                <span style="font-size: 18px; font-weight: 600; color: #111827;">⚡ Groundwork</span>
               </div>
-
-              <!-- Card -->
               <div style="background: white; border-radius: 16px; border: 1px solid #e5e7eb; padding: 32px;">
                 <h1 style="margin: 0 0 8px; font-size: 20px; font-weight: 600; color: #111827;">
                   Hi ${employee.name.split(' ')[0]},
@@ -67,23 +56,18 @@ export async function POST(request: NextRequest) {
                 <p style="margin: 0 0 24px; font-size: 14px; color: #6b7280; line-height: 1.6;">
                   ${businessName} is using Groundwork to understand how the team works and find opportunities to improve. You've been added as <strong>${employee.role}</strong>.
                 </p>
-
                 <p style="margin: 0 0 24px; font-size: 14px; color: #6b7280; line-height: 1.6;">
                   Groundwork runs quietly in the background and takes a screenshot every 30 seconds to classify what type of work you're doing. No keystrokes or personal data are recorded — only work categories and software usage.
                 </p>
-
-                <!-- CTA Button -->
                 <a href="${installUrl}" style="display: block; background: #111827; color: white; text-align: center; padding: 12px 24px; border-radius: 8px; text-decoration: none; font-size: 14px; font-weight: 500; margin-bottom: 24px;">
                   Download your installer
                 </a>
-
                 <p style="margin: 0; font-size: 12px; color: #9ca3af; text-align: center;">
                   This link is unique to you. Don't share it with others.
                 </p>
               </div>
-
               <p style="text-align: center; font-size: 12px; color: #9ca3af; margin-top: 24px;">
-                Groundwork · Workflow Intelligence Platform
+                Groundwork · gwork.tech
               </p>
             </div>
           </body>
@@ -98,7 +82,6 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ error: 'Failed to send email' }, { status: 500 })
     }
 
-    // Mark email as sent
     await supabase
       .from('employees')
       .update({ invite_sent_at: new Date().toISOString() })
