@@ -5,10 +5,12 @@ import { useState } from 'react'
 export function CopyButton({
   value,
   label = 'Copy',
+  copiedLabel = '✅ Copied to clipboard',
   className,
 }: {
   value: string
   label?: string
+  copiedLabel?: string
   className?: string
 }) {
   const [copied, setCopied] = useState(false)
@@ -32,7 +34,7 @@ export function CopyButton({
         'text-xs font-medium text-gray-600 hover:text-gray-900 px-2 py-1 rounded hover:bg-gray-100 transition-colors shrink-0'
       }
     >
-      {copied ? 'Copied' : label}
+      {copied ? copiedLabel : label}
     </button>
   )
 }

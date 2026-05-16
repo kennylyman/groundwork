@@ -14,7 +14,6 @@ export default async function InstallPage({ params }: { params: Promise<{ token:
   if (!employee) return notFound()
 
   const businessName = employee.businesses?.name || 'your company'
-  const runCommand = `.\\Groundwork.exe ${token}`
 
   return (
     <div className="min-h-screen bg-gray-50 flex items-center justify-center px-4 py-10">
@@ -58,29 +57,20 @@ export default async function InstallPage({ params }: { params: Promise<{ token:
             ⬇️ Download Groundwork for Windows
           </a>
 
-          {/* Install token */}
-          <div className="mb-4">
-            <div className="flex items-center justify-between mb-2">
-              <p className="text-xs font-medium text-gray-700">Your install token</p>
-              <CopyButton value={token} />
-            </div>
-            <div className="bg-gray-50 border border-gray-200 rounded-lg px-3 py-2.5 font-mono text-xs text-gray-900 break-all select-all">
+          {/* Install token — primary action after download */}
+          <div className="mb-6">
+            <p className="text-xs font-medium text-gray-700 mb-2">Your install token</p>
+            <div className="bg-gray-50 border border-gray-200 rounded-lg px-3 py-2.5 font-mono text-xs text-gray-900 break-all select-all mb-2">
               {token}
             </div>
-          </div>
-
-          {/* First-run command */}
-          <div className="mb-6">
-            <div className="flex items-center justify-between mb-2">
-              <p className="text-xs font-medium text-gray-700">First-run command</p>
-              <CopyButton value={runCommand} label="Copy command" />
-            </div>
-            <div className="bg-gray-900 text-gray-100 rounded-lg px-3 py-2.5 font-mono text-xs break-all select-all">
-              {runCommand}
-            </div>
+            <CopyButton
+              value={token}
+              label="📋 Copy token"
+              className="block w-full bg-indigo-600 text-white text-sm font-medium py-3 rounded-xl text-center hover:bg-indigo-700 active:bg-indigo-800 transition-colors"
+            />
             <p className="text-[11px] text-gray-500 mt-2 leading-relaxed">
-              You only need this command the first time. After that, Groundwork
-              saves your settings and you can just double-click the exe.
+              You'll paste this into Groundwork the first time you launch it.
+              After that, the app remembers it.
             </p>
           </div>
 
@@ -89,11 +79,10 @@ export default async function InstallPage({ params }: { params: Promise<{ token:
             <p className="text-xs font-medium text-gray-700">Setup steps</p>
             {[
               { step: '1', text: 'Download Groundwork.exe (button above) — it lands in your Downloads folder.' },
-              { step: '2', text: 'Press Win + X and choose "Terminal" (or "Windows PowerShell").' },
-              { step: '3', text: 'Type cd Downloads and press Enter.' },
-              { step: '4', text: 'Paste the first-run command above and press Enter.' },
-              { step: '5', text: 'If Windows SmartScreen blocks it: click "More info" → "Run anyway".' },
-              { step: '6', text: 'Done — Groundwork runs silently. Future launches don\'t need the token.' },
+              { step: '2', text: 'Double-click Groundwork.exe to launch it.' },
+              { step: '3', text: 'If Windows SmartScreen blocks it: click "More info" → "Run anyway".' },
+              { step: '4', text: 'Paste your install token into the window that appears, then click Continue.' },
+              { step: '5', text: 'Done — Groundwork runs silently. Future launches skip this step.' },
             ].map(item => (
               <div key={item.step} className="flex gap-3">
                 <div className="w-5 h-5 rounded-full bg-gray-900 text-white flex items-center justify-center text-xs font-medium shrink-0">
