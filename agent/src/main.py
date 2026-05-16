@@ -1,185 +1,107 @@
+import os
+import sys
 import time
 import json
-import os
-import signal
-import sys
+import traceback
 from datetime import datetime
 from pathlib import Path
-from dotenv import load_dotenv
 
-load_dotenv()
+# Set up logging first before anything else
+log_dir = Path(os.environ.get('APPDATA', '.')) / 'Groundwork'
+log_dir.mkdir(parents=True, exist_ok=True)
+log_file = log_dir / 'groundwork.log'
 
-from capture import build_context_snapshot, start_input_listeners
-from classify import classify_snapshot, print_classification
-from transmit import transmit_capture, flush_queue, create_session, end_session
+def log(msg):
+    timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    line = f"[{timestamp}] {msg}"
+    print(line)
+    with open(log_file, 'a') as f:
+        f.write(line + '\n')
 
-# Configuration
-CAPTURE_INTERVAL = 30        # seconds between captures
-MAX_PREVIOUS_TASKS = 8       # how many recent tasks to include as context
-IDLE_SKIP_THRESHOLD = 300    # skip capture if idle > 5 minutes (saves API costs)
-LOG_DIR = Path("../logs")    # where JSON logs are stored
+log("Groundwork starting...")
+log(f"Python: {sys.version}")
+log(f"Executable: {sys.executable}")
+log(f"Log file: {log_file}")
 
-# State
-previous_tasks = []
-running = True
-session_start = datetime.now().strftime("%Y-%m-%dT%H-%M-%S")
-log_file = LOG_DIR / f"session_{session_start}.json"
-employee_id = os.getenv("EMPLOYEE_ID", "unknown")
-business_id = os.getenv("BUSINESS_ID", "comfort_keepers")
-
-
-def setup():
-    """Initialize logging directory and session file."""
-    LOG_DIR.mkdir(parents=True, exist_ok=True)
+try:
+    from dotenv import load_dotenv
     
-    session_meta = {
-        "session_id": session_start,
-        "employee_id": employee_id,
-        "business_id": business_id,
-        "started_at": datetime.now().isoformat(),
-        "captures": []
-    }
+    # Find .env file
+    if getattr(sys, 'frozen', False):
+        base_dir = Path(sys._MEIPASS)
+    else:
+        base_dir = Path(__file__).parent
     
-    with open(log_file, "w") as f:
-        json.dump(session_meta, f, indent=2)
+    env_path = base_dir / '.env'
+    log(f"Looking for .env at: {env_path}")
+    log(f".env exists: {env_path.exists()}")
     
-    print(f"Groundwork Agent — Session started")
-    print(f"Employee:  {employee_id}")
-    print(f"Business:  {business_id}")
-    print(f"Log file:  {log_file}")
-    print(f"Interval:  {CAPTURE_INTERVAL}s")
-    print("-" * 60)
-    
-    # Flush any queued captures from previous sessions
-    flush_queue()
+    if env_path.exists():
+        load_dotenv(env_path)
+        log(".env loaded successfully")
+    else:
+        log("ERROR: .env file not found!")
+        sys.exit(1)
 
+    ANTHROPIC_API_KEY = os.getenv('ANTHROPIC_API_KEY')
+    SUPABASE_URL = os.getenv('SUPABASE_URL')
+    SUPABASE_ANON_KEY = os.getenv('SUPABASE_ANON_KEY')
+    EMPLOYEE_ID = os.getenv('EMPLOYEE_ID')
+    BUSINESS_ID = os.getenv('BUSINESS_ID')
 
-def append_to_log(result: dict):
-    """Append a classification result to the session log file."""
-    try:
-        with open(log_file, "r") as f:
-            session = json.load(f)
-        
-        session["captures"].append(result)
-        session["last_updated"] = datetime.now().isoformat()
-        session["total_captures"] = len(session["captures"])
-        
-        with open(log_file, "w") as f:
-            json.dump(session, f, indent=2)
-    except Exception as e:
-        print(f"Log write error: {e}")
+    log(f"ANTHROPIC_API_KEY: {'set' if ANTHROPIC_API_KEY else 'MISSING'}")
+    log(f"SUPABASE_URL: {'set' if SUPABASE_URL else 'MISSING'}")
+    log(f"EMPLOYEE_ID: {EMPLOYEE_ID or 'MISSING'}")
+    log(f"BUSINESS_ID: {BUSINESS_ID or 'MISSING'}")
 
+    if not all([ANTHROPIC_API_KEY, SUPABASE_URL, SUPABASE_ANON_KEY, EMPLOYEE_ID, BUSINESS_ID]):
+        log("ERROR: Missing required environment variables")
+        sys.exit(1)
 
-def update_previous_tasks(result: dict):
-    """Keep a rolling window of recent task descriptions for context."""
-    global previous_tasks
-    task_summary = f"[{result['timestamp']}] {result['task']} ({result['category']})"
-    previous_tasks.append(task_summary)
-    if len(previous_tasks) > MAX_PREVIOUS_TASKS:
-        previous_tasks = previous_tasks[-MAX_PREVIOUS_TASKS:]
+    log("Importing modules...")
+    from capture import take_snapshot
+    from classify import classify_snapshot
+    from transmit import transmit_capture
+    log("All modules imported successfully")
 
+    CAPTURE_INTERVAL = 30
+    session_id = f"session_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+    log(f"Session ID: {session_id}")
+    log(f"Capture interval: {CAPTURE_INTERVAL}s")
+    log("Starting capture loop...")
 
-def handle_shutdown(signum, frame):
-    """Graceful shutdown on Ctrl+C."""
-    global running
-    print("\n\nShutting down Groundwork agent...")
-    print(f"Session log saved to: {log_file}")
-    
-    # Write final session summary
-    try:
-        with open(log_file, "r") as f:
-            session = json.load(f)
-        session["ended_at"] = datetime.now().isoformat()
-        session["status"] = "completed"
-        with open(log_file, "w") as f:
-            json.dump(session, f, indent=2)
-    except Exception:
-        pass
-    
-    running = False
-    sys.exit(0)
+    while True:
+        try:
+            log("Taking snapshot...")
+            snapshot = take_snapshot()
+            log(f"Snapshot taken: {snapshot.get('active_window', 'unknown')}")
 
+            log("Classifying...")
+            classification = classify_snapshot(snapshot, ANTHROPIC_API_KEY)
+            log(f"Classified: {classification.get('task', 'unknown')} ({classification.get('confidence', 0)}%)")
 
-def run_capture_cycle(cycle_num: int):
-    """Run one full capture → classify → log cycle."""
-    print(f"\n[Cycle {cycle_num}] {datetime.now().strftime('%H:%M:%S')} — Capturing...")
-    
-    try:
-        # Build context snapshot
-        snapshot = build_context_snapshot(previous_tasks=previous_tasks)
-        
-        # Skip if deeply idle — saves API costs
-        if snapshot["idle_seconds"] > IDLE_SKIP_THRESHOLD:
-            print(f"[Cycle {cycle_num}] Skipping — idle for {snapshot['idle_seconds']:.0f}s")
-            return
-        
-        # Classify with Claude Vision
-        print(f"[Cycle {cycle_num}] Sending to Claude...")
-        result = classify_snapshot(snapshot)
-        
-        # Display result
-        print_classification(result)
-        
-        # Log result locally
-        append_to_log(result)
-        
-        # Transmit to Supabase cloud
-        transmitted = transmit_capture(result)
-        if transmitted:
-            print(f"  ☁️  Transmitted to cloud")
-        
-        # Update context for next cycle
-        update_previous_tasks(result)
-        
-        # Flag high value automation opportunities
-        if result.get("automation_potential") == "high":
-            print(f"  ⚡ HIGH AUTOMATION OPPORTUNITY DETECTED")
-        
-        if "high_value_automation" in result.get("flags", []):
-            print(f"  ⚡ HIGH VALUE AUTOMATION FLAG")
-            
-    except json.JSONDecodeError as e:
-        print(f"[Cycle {cycle_num}] Claude response parse error: {e}")
-    except Exception as e:
-        print(f"[Cycle {cycle_num}] Error: {e}")
-        import traceback
-        traceback.print_exc()
+            capture_data = {
+                'employee_id': EMPLOYEE_ID,
+                'business_id': BUSINESS_ID,
+                'session_id': session_id,
+                'captured_at': datetime.utcnow().isoformat(),
+                **snapshot,
+                **classification,
+            }
 
+            log("Transmitting...")
+            transmit_capture(capture_data, SUPABASE_URL, SUPABASE_ANON_KEY)
+            log("Transmitted successfully")
 
-def main():
-    global running
-    
-    # Setup signal handler for graceful shutdown
-    signal.signal(signal.SIGINT, handle_shutdown)
-    signal.signal(signal.SIGTERM, handle_shutdown)
-    
-    # Initialize
-    setup()
-    
-    # Start input listeners
-    print("Starting input listeners...")
-    start_input_listeners()
-    time.sleep(1)
-    
-    print("Agent running. Press Ctrl+C to stop.\n")
-    
-    cycle_num = 1
-    
-    # Run first capture immediately
-    run_capture_cycle(cycle_num)
-    cycle_num += 1
-    
-    # Then loop every CAPTURE_INTERVAL seconds
-    while running:
-        # Wait for next interval
-        next_capture = time.time() + CAPTURE_INTERVAL
-        while time.time() < next_capture and running:
-            time.sleep(1)
-        
-        if running:
-            run_capture_cycle(cycle_num)
-            cycle_num += 1
+        except Exception as e:
+            log(f"Capture error: {e}")
+            log(traceback.format_exc())
 
+        log(f"Sleeping {CAPTURE_INTERVAL}s...")
+        time.sleep(CAPTURE_INTERVAL)
 
-if __name__ == "__main__":
-    main()
+except Exception as e:
+    log(f"FATAL ERROR: {e}")
+    log(traceback.format_exc())
+    time.sleep(30)
+    sys.exit(1)
