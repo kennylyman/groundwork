@@ -199,6 +199,7 @@ def load_or_activate_config() -> dict:
     config = _read_existing_config()
     if config is not None:
         log(f"Reading config from {CONFIG_FILE}")
+        _ensure_startup_installed(config)
         return config
 
     # No saved config — need to activate.
@@ -214,11 +215,11 @@ def load_or_activate_config() -> dict:
 
     CONFIG_FILE.write_text(json.dumps(config, indent=2))
     log(f"Config saved to {CONFIG_FILE}")
-    install_to_startup()
+    _ensure_startup_installed(config)
     return config
 
 
-def install_to_startup() -> None:
+def install_to_startup() -> bool:
     """
     Register this exe in HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run
     so Windows auto-launches Groundwork on the user's next login.
@@ -227,19 +228,23 @@ def install_to_startup() -> None:
     - Only acts when running as the frozen PyInstaller exe (sys.frozen).
     - No-op if already pointed at the current exe path.
     - HKCU (per-user) — no admin needed, scoped to this user's account.
+
+    Returns True iff the registry entry is now set to this exe path.
+    Returns False when skipped (not Windows / not frozen) or on error,
+    so the caller can decide whether to retry on a later launch.
     """
     if sys.platform != 'win32':
         log("Skipping startup install (not Windows)")
-        return
+        return False
     if not getattr(sys, 'frozen', False):
         log("Skipping startup install (not a frozen exe)")
-        return
+        return False
 
     try:
         import winreg  # stdlib on Windows
     except ImportError as e:
         log(f"winreg unavailable: {e}")
-        return
+        return False
 
     exe_path = sys.executable
     run_key = r"Software\Microsoft\Windows\CurrentVersion\Run"
@@ -256,15 +261,40 @@ def install_to_startup() -> None:
                 existing, _ = winreg.QueryValueEx(key, value_name)
                 if existing == exe_path:
                     log(f"Startup entry already set: {exe_path}")
-                    return
+                    return True
                 log(f"Updating startup entry: {existing!r} -> {exe_path!r}")
             except FileNotFoundError:
                 log(f"Adding startup entry: {exe_path}")
             winreg.SetValueEx(key, value_name, 0, winreg.REG_SZ, exe_path)
+            return True
     except Exception as e:
         # Non-fatal — we still want the agent to run this session even if
         # the startup hook fails.
         log(f"Could not write HKCU Run entry: {e}")
+        return False
+
+
+def _ensure_startup_installed(config: dict) -> None:
+    """
+    One-time post-activation hook: install the startup-registry entry and
+    record a `startup_installed: true` marker in config.json so we don't
+    retry on every launch (and so manual user cleanup of the Run entry
+    stays sticky).
+
+    Called both on first-time activation and when reading an existing
+    config that predates this hook — so installs that activated before
+    this change get retro-fitted on their next launch.
+    """
+    if config.get('startup_installed'):
+        return
+    if not install_to_startup():
+        return
+    config['startup_installed'] = True
+    try:
+        CONFIG_FILE.write_text(json.dumps(config, indent=2))
+        log("Marked config.startup_installed = true")
+    except Exception as e:
+        log(f"Could not persist startup_installed flag: {e}")
 
 
 def run_capture_loop(config: dict) -> None:

@@ -39,6 +39,8 @@ def _build_payload(snapshot: dict, classification: dict, session_id: str, config
         "active_window": snapshot.get("active_window"),
         "active_url": snapshot.get("active_url"),
         "keystrokes": snapshot.get("keystrokes_last_90s", 0),
+        "mouse_clicks": snapshot.get("mouse_clicks_last_90s", 0),
+        "copy_paste_events": snapshot.get("copy_paste_events_last_90s", 0),
         "idle_seconds": idle_seconds,
         "is_idle": idle_seconds > 60,
         "raw_json": raw,
