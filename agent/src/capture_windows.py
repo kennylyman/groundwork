@@ -249,9 +249,9 @@ def build_context_snapshot(previous_tasks=None):
         "screenshot_b64": capture_screenshot(),
         "active_window": get_active_window(),
         "active_url": get_active_url(),
-        "keystrokes_last_interval": keystrokes,
-        "mouse_clicks_last_interval": clicks,
-        "copy_paste_events_last_interval": pastes,
+        "keystrokes_last_90s": keystrokes,
+        "mouse_clicks_last_90s": clicks,
+        "copy_paste_events_last_90s": pastes,
         "idle_seconds": round(idle, 1),
         "is_idle": idle > 60,
         "platform": platform.system(),
@@ -273,8 +273,8 @@ if __name__ == "__main__":
     print(f"Timestamp:     {snapshot['timestamp']}")
     print(f"Active window: {snapshot['active_window']}")
     print(f"Active URL:    {snapshot['active_url']}")
-    print(f"Keystrokes:    {snapshot['keystrokes_last_interval']}")
-    print(f"Mouse clicks:  {snapshot['mouse_clicks_last_interval']}")
+    print(f"Keystrokes:    {snapshot['keystrokes_last_90s']}")
+    print(f"Mouse clicks:  {snapshot['mouse_clicks_last_90s']}")
     print(f"Idle seconds:  {snapshot['idle_seconds']}")
     print(f"Screenshot:    {len(snapshot['screenshot_b64'])} chars (base64)")
     print("\nCapture successful.")
