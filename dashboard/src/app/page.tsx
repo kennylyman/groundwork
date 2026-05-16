@@ -2,8 +2,9 @@
 
 import { useEffect, useState } from 'react'
 import { supabase, Employee, Capture } from '@/lib/supabase'
-import { Activity, Users, Zap, TrendingUp, Clock, AlertCircle } from 'lucide-react'
+import { Activity, Users, Zap, TrendingUp, Clock, AlertCircle, FileText } from 'lucide-react'
 import { useRouter } from 'next/navigation'
+import Link from 'next/link'
 import { PauseToggle, PausedBadge } from '@/components/PauseToggle'
 
 type EmployeeWithStatus = Employee & {
@@ -168,9 +169,18 @@ export default function Dashboard() {
               <p className="text-xs text-gray-500">{businessName}</p>
             </div>
           </div>
-          <div className="flex items-center gap-2">
-            <div className="w-2 h-2 bg-green-400 rounded-full animate-pulse" />
-            <span className="text-xs text-gray-500">Live</span>
+          <div className="flex items-center gap-4">
+            <Link
+              href="/sop"
+              className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-gray-700 bg-gray-100 rounded-lg hover:bg-gray-200 transition-colors"
+            >
+              <FileText className="w-3.5 h-3.5" />
+              SOP Builder
+            </Link>
+            <div className="flex items-center gap-2">
+              <div className="w-2 h-2 bg-green-400 rounded-full animate-pulse" />
+              <span className="text-xs text-gray-500">Live</span>
+            </div>
           </div>
         </div>
       </div>
