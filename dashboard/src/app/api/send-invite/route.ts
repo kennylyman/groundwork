@@ -3,7 +3,7 @@ import { createClient } from '@supabase/supabase-js'
 
 const supabase = createClient(
   process.env.NEXT_PUBLIC_SUPABASE_URL!,
-  process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!
+  process.env.SUPABASE_SERVICE_ROLE_KEY!
 )
 
 export async function POST(request: NextRequest) {
@@ -17,7 +17,7 @@ export async function POST(request: NextRequest) {
       .single()
 
     if (empError || !employee) {
-      return NextResponse.json({ error: 'Employee not found' }, { status: 404 })
+      return NextResponse.json({ error: 'Employee not found', detail: empError?.message }, { status: 404 })
     }
 
     if (!employee.email) {
@@ -40,24 +40,18 @@ export async function POST(request: NextRequest) {
         html: `
           <!DOCTYPE html>
           <html>
-          <head>
-            <meta charset="utf-8">
-            <meta name="viewport" content="width=device-width, initial-scale=1">
-          </head>
           <body style="margin: 0; padding: 0; background: #f9fafb; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;">
             <div style="max-width: 480px; margin: 40px auto; padding: 0 20px;">
               <div style="text-align: center; margin-bottom: 32px;">
                 <span style="font-size: 18px; font-weight: 600; color: #111827;">⚡ Groundwork</span>
               </div>
               <div style="background: white; border-radius: 16px; border: 1px solid #e5e7eb; padding: 32px;">
-                <h1 style="margin: 0 0 8px; font-size: 20px; font-weight: 600; color: #111827;">
-                  Hi ${employee.name.split(' ')[0]},
-                </h1>
+                <h1 style="margin: 0 0 8px; font-size: 20px; font-weight: 600; color: #111827;">Hi ${employee.name.split(' ')[0]},</h1>
                 <p style="margin: 0 0 24px; font-size: 14px; color: #6b7280; line-height: 1.6;">
-                  ${businessName} is using Groundwork to understand how the team works and find opportunities to improve. You've been added as <strong>${employee.role}</strong>.
+                  ${businessName} is using Groundwork to understand how the team works. You've been added as <strong>${employee.role}</strong>.
                 </p>
                 <p style="margin: 0 0 24px; font-size: 14px; color: #6b7280; line-height: 1.6;">
-                  Groundwork runs quietly in the background and takes a screenshot every 30 seconds to classify what type of work you're doing. No keystrokes or personal data are recorded — only work categories and software usage.
+                  Groundwork runs quietly in the background and takes a screenshot every 30 seconds to classify what type of work you're doing. No keystrokes or personal data are recorded.
                 </p>
                 <a href="${installUrl}" style="display: block; background: #111827; color: white; text-align: center; padding: 12px 24px; border-radius: 8px; text-decoration: none; font-size: 14px; font-weight: 500; margin-bottom: 24px;">
                   Download your installer
@@ -66,9 +60,7 @@ export async function POST(request: NextRequest) {
                   This link is unique to you. Don't share it with others.
                 </p>
               </div>
-              <p style="text-align: center; font-size: 12px; color: #9ca3af; margin-top: 24px;">
-                Groundwork · gwork.tech
-              </p>
+              <p style="text-align: center; font-size: 12px; color: #9ca3af; margin-top: 24px;">Groundwork · gwork.tech</p>
             </div>
           </body>
           </html>
@@ -79,7 +71,7 @@ export async function POST(request: NextRequest) {
     if (!response.ok) {
       const error = await response.text()
       console.error('Resend error:', error)
-      return NextResponse.json({ error: 'Failed to send email' }, { status: 500 })
+      return NextResponse.json({ error: 'Failed to send email', detail: error }, { status: 500 })
     }
 
     await supabase
@@ -89,8 +81,8 @@ export async function POST(request: NextRequest) {
 
     return NextResponse.json({ success: true })
 
-  } catch (err) {
+  } catch (err: any) {
     console.error('Send invite error:', err)
-    return NextResponse.json({ error: 'Internal server error' }, { status: 500 })
+    return NextResponse.json({ error: 'Internal server error', detail: err.message }, { status: 500 })
   }
 }
