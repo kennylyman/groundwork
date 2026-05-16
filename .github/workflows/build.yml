@@ -1,0 +1,60 @@
+name: Build Groundwork Windows Agent
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:  # Allow manual trigger from GitHub UI
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install anthropic mss pillow cryptography requests pynput python-dotenv pyinstaller psutil pywinauto
+
+      - name: Create .env file from secrets
+        run: |
+          echo "ANTHROPIC_API_KEY=${{ secrets.ANTHROPIC_API_KEY }}" > agent/src/.env
+          echo "SUPABASE_URL=${{ secrets.SUPABASE_URL }}" >> agent/src/.env
+          echo "SUPABASE_ANON_KEY=${{ secrets.SUPABASE_ANON_KEY }}" >> agent/src/.env
+          echo "BUSINESS_ID=${{ secrets.BUSINESS_ID }}" >> agent/src/.env
+
+      - name: Copy Windows capture module
+        run: |
+          copy agent\src\capture_windows.py agent\src\capture.py
+
+      - name: Build Windows executable
+        working-directory: agent
+        run: |
+          pyinstaller groundwork.spec --clean --distpath dist
+
+      - name: Verify build
+        run: |
+          dir agent\dist\
+          echo "Build complete"
+
+      - name: Upload executable as artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Groundwork-Windows-exe
+          path: agent/dist/Groundwork.exe
+          retention-days: 30
+
+      - name: Create release on tag
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v1
+        with:
+          files: agent/dist/Groundwork.exe
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
