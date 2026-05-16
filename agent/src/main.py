@@ -2,6 +2,7 @@ import os
 import sys
 import json
 import time
+import uuid
 import traceback
 from datetime import datetime
 from pathlib import Path
@@ -213,7 +214,57 @@ def load_or_activate_config() -> dict:
 
     CONFIG_FILE.write_text(json.dumps(config, indent=2))
     log(f"Config saved to {CONFIG_FILE}")
+    install_to_startup()
     return config
+
+
+def install_to_startup() -> None:
+    """
+    Register this exe in HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run
+    so Windows auto-launches Groundwork on the user's next login.
+
+    - Only runs on Windows.
+    - Only acts when running as the frozen PyInstaller exe (sys.frozen).
+    - No-op if already pointed at the current exe path.
+    - HKCU (per-user) — no admin needed, scoped to this user's account.
+    """
+    if sys.platform != 'win32':
+        log("Skipping startup install (not Windows)")
+        return
+    if not getattr(sys, 'frozen', False):
+        log("Skipping startup install (not a frozen exe)")
+        return
+
+    try:
+        import winreg  # stdlib on Windows
+    except ImportError as e:
+        log(f"winreg unavailable: {e}")
+        return
+
+    exe_path = sys.executable
+    run_key = r"Software\Microsoft\Windows\CurrentVersion\Run"
+    value_name = "Groundwork"
+
+    try:
+        with winreg.OpenKey(
+            winreg.HKEY_CURRENT_USER,
+            run_key,
+            0,
+            winreg.KEY_SET_VALUE | winreg.KEY_QUERY_VALUE,
+        ) as key:
+            try:
+                existing, _ = winreg.QueryValueEx(key, value_name)
+                if existing == exe_path:
+                    log(f"Startup entry already set: {exe_path}")
+                    return
+                log(f"Updating startup entry: {existing!r} -> {exe_path!r}")
+            except FileNotFoundError:
+                log(f"Adding startup entry: {exe_path}")
+            winreg.SetValueEx(key, value_name, 0, winreg.REG_SZ, exe_path)
+    except Exception as e:
+        # Non-fatal — we still want the agent to run this session even if
+        # the startup hook fails.
+        log(f"Could not write HKCU Run entry: {e}")
 
 
 def run_capture_loop(config: dict) -> None:
@@ -227,7 +278,7 @@ def run_capture_loop(config: dict) -> None:
 
     flush_queue(config)
 
-    session_id = f"session_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+    session_id = str(uuid.uuid4())
     log(f"Session: {session_id}")
     log(f"Capture interval: {CAPTURE_INTERVAL}s")
     log("Entering capture loop")
