@@ -10,9 +10,11 @@ const MODEL = 'claude-sonnet-4-20250514'
 
 const SYSTEM_PROMPT = `You are an operations consultant writing Standard Operating Procedures (SOPs) for a home care agency. You are given a series of captures from an employee's screen during the last 7 days — each capture contains the active window, software in use, classified task, reasoning, and signals like keystroke/idle counts.
 
-Your job is to synthesize these captures into a clear, professional SOP that a brand-new employee could follow on day one to perform this category of work correctly.
+Your job is to synthesize these captures into a clear, professional SOP that a brand-new frontline employee could follow on day one to perform this category of work correctly.
 
-Write in plain, direct language. Avoid corporate jargon. Each step must start with a verb, be concrete, and reference the specific software where relevant. The SOP should feel like a real operations document a business owner could hand to a new hire.
+Write in plain, direct language. Avoid corporate jargon. Each step must start with a verb, be concrete, and reference the specific software where relevant. The SOP should feel like a real operations document a business owner could hand to a new hire on their first day.
+
+Do NOT include automation suggestions, ROI commentary, or owner-facing analysis — this document is for the person doing the work, not for the person paying for it.
 
 Output ONLY valid JSON in this exact shape — no preamble, no markdown fences, no commentary:
 {
@@ -21,8 +23,7 @@ Output ONLY valid JSON in this exact shape — no preamble, no markdown fences, 
   "trigger": "What event, schedule, or condition starts this procedure",
   "steps": ["1. Verb-first step…", "2. Verb-first step…", "…"],
   "software": ["Distinct app or tool name", "…"],
-  "time_estimate": "Typical duration with a range, e.g. '15-20 minutes'",
-  "automation_opportunities": ["Specific repetitive task that could be automated, with a concrete suggestion", "…"]
+  "time_estimate": "Typical duration with a range, e.g. '15-20 minutes'"
 }
 
 If the captures are sparse, low-confidence, or don't clearly describe a procedure, still produce the best SOP you can from what's there — but in "overview", note candidly that the source data was limited and what would help (e.g. "more captures of this task type, or a recorded walkthrough"). Never refuse.`
@@ -49,7 +50,6 @@ type Sop = {
   steps: string[]
   software: string[]
   time_estimate: string
-  automation_opportunities: string[]
 }
 
 export async function POST(request: NextRequest) {

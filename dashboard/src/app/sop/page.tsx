@@ -15,8 +15,6 @@ import {
   ListChecks,
   Layers,
   Clock,
-  Lightbulb,
-  Zap,
   Calendar,
   User,
   Tag,
@@ -31,7 +29,6 @@ type Sop = {
   steps: string[]
   software: string[]
   time_estimate: string
-  automation_opportunities: string[]
 }
 
 type SopMeta = {
@@ -331,14 +328,6 @@ function SopDocument({
             {sop.time_estimate}
           </p>
         </SectionCard>
-
-        <SectionCard label="Automation opportunities" icon={Lightbulb} accent="purple">
-          <div className="space-y-2.5">
-            {sop.automation_opportunities.map((a, i) => (
-              <AutomationCard key={i} text={a} />
-            ))}
-          </div>
-        </SectionCard>
       </div>
     </div>
   )
@@ -479,19 +468,6 @@ function SoftwarePill({ name }: { name: string }) {
   )
 }
 
-// ---------- Automation card ----------
-
-function AutomationCard({ text }: { text: string }) {
-  return (
-    <div className="flex gap-3 px-4 py-3 bg-amber-50/60 border border-amber-100 rounded-xl">
-      <div className="shrink-0 w-8 h-8 rounded-lg bg-amber-100 text-amber-600 flex items-center justify-center">
-        <Zap className="w-4 h-4" />
-      </div>
-      <p className="text-[14px] text-amber-900 leading-relaxed pt-0.5">{text}</p>
-    </div>
-  )
-}
-
 // ---------- Loading skeleton ----------
 
 function SopSkeleton() {
@@ -570,8 +546,5 @@ function sopToPlainText(sop: Sop, meta: SopMeta | null): string {
   lines.push('')
   lines.push('TIME ESTIMATE')
   lines.push(sop.time_estimate)
-  lines.push('')
-  lines.push('AUTOMATION OPPORTUNITIES')
-  sop.automation_opportunities.forEach((a) => lines.push(`- ${a}`))
   return lines.join('\n')
 }
