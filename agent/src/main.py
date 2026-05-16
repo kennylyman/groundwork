@@ -22,7 +22,11 @@ CAPTURE_INTERVAL = 30
 
 def log(msg: str) -> None:
     line = f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] {msg}"
-    print(line)
+    # PyInstaller --windowed sets sys.stdout to None on Windows; print() would crash.
+    try:
+        print(line)
+    except Exception:
+        pass
     try:
         with open(LOG_FILE, 'a') as f:
             f.write(line + '\n')
@@ -60,48 +64,153 @@ def activate(token: str) -> dict:
     response = requests.get(ACTIVATION_URL, params={'token': token}, timeout=30)
     if response.status_code != 200:
         raise RuntimeError(
-            f"Activation failed: HTTP {response.status_code} — {response.text[:300]}"
+            f"HTTP {response.status_code}: {response.text[:200].strip()}"
         )
     data = response.json()
     required = ['employee_id', 'business_id', 'anthropic_api_key',
                 'supabase_url', 'supabase_anon_key']
     missing = [k for k in required if not data.get(k)]
     if missing:
-        raise RuntimeError(f"Activation response missing fields: {missing}")
+        raise RuntimeError(f"Response missing fields: {missing}")
     return data
 
 
-def load_or_activate_config() -> dict:
-    if CONFIG_FILE.exists():
-        log(f"Reading config from {CONFIG_FILE}")
+def prompt_for_token_gui() -> dict | None:
+    """
+    Show a small setup window asking for the install token. On Continue,
+    call activate() and either close on success or display the error and
+    let the user retry. Returns the activated config dict, or None if the
+    user closed the window without activating.
+    """
+    try:
+        import tkinter as tk
+    except Exception as e:
+        log(f"tkinter unavailable: {e}")
+        return None
+
+    result: dict = {}
+    root = tk.Tk()
+    root.title("Groundwork Setup")
+    root.resizable(False, False)
+    root.configure(bg='white')
+
+    # Size + center
+    W, H = 480, 360
+    sw, sh = root.winfo_screenwidth(), root.winfo_screenheight()
+    root.geometry(f"{W}x{H}+{(sw - W) // 2}+{(sh - H) // 2}")
+
+    frame = tk.Frame(root, bg='white', padx=28, pady=24)
+    frame.pack(fill='both', expand=True)
+
+    tk.Label(
+        frame, text="Welcome to Groundwork",
+        font=('Segoe UI', 16, 'bold'), bg='white', fg='#111',
+    ).pack(anchor='w')
+
+    tk.Label(
+        frame, text="Paste your install token to activate this agent.",
+        font=('Segoe UI', 10), bg='white', fg='#666', anchor='w', justify='left',
+    ).pack(anchor='w', pady=(6, 18))
+
+    tk.Label(
+        frame, text="Install token",
+        font=('Segoe UI', 9, 'bold'), bg='white', fg='#444',
+    ).pack(anchor='w')
+
+    entry = tk.Entry(frame, font=('Consolas', 10), relief='solid', bd=1)
+    entry.pack(fill='x', pady=(4, 4), ipady=8, ipadx=6)
+    entry.focus()
+
+    tk.Label(
+        frame, text="Find it in the email you received or on your install page.",
+        font=('Segoe UI', 8), bg='white', fg='#999', anchor='w',
+    ).pack(anchor='w', pady=(0, 14))
+
+    status = tk.Label(
+        frame, text="", font=('Segoe UI', 9), bg='white',
+        anchor='w', wraplength=420, justify='left',
+    )
+    status.pack(anchor='w', fill='x', pady=(0, 14))
+
+    def on_continue() -> None:
+        token = entry.get().strip()
+        if not token:
+            status.config(text="Please paste your install token.", fg='#c00')
+            return
+        button.config(state='disabled', text='Verifying…')
+        status.config(text='Contacting activation server…', fg='#666')
+        root.update_idletasks()
+        try:
+            config = activate(token)
+        except Exception as e:
+            log(f"GUI activation error: {e}")
+            button.config(state='normal', text='Continue')
+            status.config(text=f"Activation failed — {e}", fg='#c00')
+            return
+        result['config'] = config
+        root.destroy()
+
+    button = tk.Button(
+        frame, text="Continue",
+        font=('Segoe UI', 10, 'bold'),
+        bg='#4f46e5', fg='white',
+        activebackground='#4338ca', activeforeground='white',
+        relief='flat', cursor='hand2',
+        padx=24, pady=10,
+        command=on_continue,
+    )
+    button.pack(anchor='e')
+
+    entry.bind('<Return>', lambda _e: on_continue())
+
+    log("Showing setup window")
+    root.mainloop()
+    return result.get('config')
+
+
+def _read_existing_config() -> dict | None:
+    """Return the saved config, or None if missing/invalid."""
+    if not CONFIG_FILE.exists():
+        return None
+    try:
         config = json.loads(CONFIG_FILE.read_text())
-        # Apply env fallbacks for shared creds if missing from config
-        for key, env_key in (
-            ('anthropic_api_key', 'ANTHROPIC_API_KEY'),
-            ('supabase_url', 'SUPABASE_URL'),
-            ('supabase_anon_key', 'SUPABASE_ANON_KEY'),
-        ):
-            if not config.get(key):
-                fallback = os.environ.get(env_key)
-                if fallback:
-                    config[key] = fallback
-                    log(f"Applied env fallback for {key}")
-        if not config.get('employee_id') or not config.get('business_id'):
-            raise RuntimeError(
-                "config.json missing employee_id/business_id — "
-                "delete it and re-run with an install token to re-activate."
-            )
+    except Exception as e:
+        log(f"config.json unreadable ({e}) — will re-activate")
+        return None
+    # Apply env fallbacks for shared creds if missing from config
+    for key, env_key in (
+        ('anthropic_api_key', 'ANTHROPIC_API_KEY'),
+        ('supabase_url', 'SUPABASE_URL'),
+        ('supabase_anon_key', 'SUPABASE_ANON_KEY'),
+    ):
+        if not config.get(key):
+            fallback = os.environ.get(env_key)
+            if fallback:
+                config[key] = fallback
+                log(f"Applied env fallback for {key}")
+    if not config.get('employee_id') or not config.get('business_id'):
+        log("config.json missing employee_id/business_id — will re-activate")
+        return None
+    return config
+
+
+def load_or_activate_config() -> dict:
+    config = _read_existing_config()
+    if config is not None:
+        log(f"Reading config from {CONFIG_FILE}")
         return config
 
+    # No saved config — need to activate.
     token = find_install_token()
-    if not token:
-        raise RuntimeError(
-            "No config.json and no install token. "
-            "Pass token as first CLI arg, or set GROUNDWORK_INSTALL_TOKEN."
-        )
+    if token:
+        log("Activating with install token (from CLI/env)")
+        config = activate(token)
+    else:
+        log("No saved config and no token — prompting user")
+        config = prompt_for_token_gui()
+        if config is None:
+            raise RuntimeError("Setup cancelled — no install token provided")
 
-    log("No config.json — activating with install token")
-    config = activate(token)
     CONFIG_FILE.write_text(json.dumps(config, indent=2))
     log(f"Config saved to {CONFIG_FILE}")
     return config
