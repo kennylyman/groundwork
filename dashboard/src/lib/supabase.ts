@@ -1,10 +1,15 @@
 import { createClient, SupabaseClient } from '@supabase/supabase-js'
+import { createBrowserClient } from '@supabase/ssr'
 
 const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL!
 const supabaseAnonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!
 
 // Anon client — safe for browser. RLS applies.
-export const supabase = createClient(supabaseUrl, supabaseAnonKey)
+// Uses @supabase/ssr's cookie-backed session so middleware (and any
+// future Server Component) can see the user via cookies. The API is
+// identical to @supabase/supabase-js's createClient — `.auth.*` and
+// `.from(...)` work the same way for all existing callers.
+export const supabase = createBrowserClient(supabaseUrl, supabaseAnonKey)
 
 // Service-role client — server-side only. Bypasses RLS.
 // Never import into a Client Component: the service-role key would do nothing
