@@ -106,14 +106,14 @@ def classify_snapshot(snapshot: dict, api_key: str | None = None) -> dict:
     ]) or "  None yet"
 
     prompt = CLASSIFICATION_PROMPT.format(
-        timestamp=snapshot["timestamp"],
-        active_window=snapshot["active_window"] or "Unknown",
-        active_url=snapshot["active_url"] or "Not a browser",
-        keystrokes=snapshot["keystrokes_last_90s"],
-        clicks=snapshot["mouse_clicks_last_90s"],
-        pastes=snapshot["copy_paste_events_last_90s"],
-        idle_seconds=snapshot["idle_seconds"],
-        is_idle=snapshot["is_idle"],
+        timestamp=snapshot.get("timestamp", ""),
+        active_window=snapshot.get("active_window") or "Unknown",
+        active_url=snapshot.get("active_url") or "Not a browser",
+        keystrokes=snapshot.get("keystrokes_last_90s", 0),
+        clicks=snapshot.get("mouse_clicks_last_90s", 0),
+        pastes=snapshot.get("copy_paste_events_last_90s", 0),
+        idle_seconds=snapshot.get("idle_seconds", 0),
+        is_idle=snapshot.get("is_idle", False),
         previous_tasks=previous_tasks_str,
     )
 
@@ -150,12 +150,12 @@ def classify_snapshot(snapshot: dict, api_key: str | None = None) -> dict:
         raw = "\n".join(lines[1:-1])
     
     result = json.loads(raw)
-    result["timestamp"] = snapshot["timestamp"]
-    result["active_window"] = snapshot["active_window"]
-    result["active_url"] = snapshot["active_url"]
-    result["keystrokes"] = snapshot["keystrokes_last_90s"]
-    result["idle_seconds"] = snapshot["idle_seconds"]
-    
+    result["timestamp"] = snapshot.get("timestamp", "")
+    result["active_window"] = snapshot.get("active_window")
+    result["active_url"] = snapshot.get("active_url")
+    result["keystrokes"] = snapshot.get("keystrokes_last_90s", 0)
+    result["idle_seconds"] = snapshot.get("idle_seconds", 0)
+
     return result
 
 
