@@ -1,11 +1,20 @@
 import anthropic
 import json
 import os
-from dotenv import load_dotenv
 
-load_dotenv()
+_client = None
+_client_key = None
 
-client = anthropic.Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
+
+def _get_client(api_key: str | None = None):
+    global _client, _client_key
+    key = api_key or os.environ.get("ANTHROPIC_API_KEY")
+    if not key:
+        raise RuntimeError("ANTHROPIC_API_KEY not provided to classify_snapshot")
+    if _client is None or _client_key != key:
+        _client = anthropic.Anthropic(api_key=key)
+        _client_key = key
+    return _client
 
 SYSTEM_PROMPT = """You are an expert business process analyst embedded in a workflow monitoring system called Groundwork.
 
@@ -83,11 +92,15 @@ For the flags array, include any of these that apply:
 - "anomaly" — unusual for this time of day or role"""
 
 
-def classify_snapshot(snapshot: dict) -> dict:
+def classify_snapshot(snapshot: dict, api_key: str | None = None) -> dict:
     """
     Send a context snapshot to Claude Vision and get a task classification.
     Returns parsed JSON classification dict.
+
+    api_key: Anthropic API key. If omitted, falls back to ANTHROPIC_API_KEY env var.
     """
+    client = _get_client(api_key)
+
     previous_tasks_str = "\n".join([
         f"  - {t}" for t in snapshot.get("previous_tasks", [])
     ]) or "  None yet"
