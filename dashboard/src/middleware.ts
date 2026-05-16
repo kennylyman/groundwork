@@ -14,8 +14,9 @@ const REQUIRES_BUSINESS = new Set(['/'])
 export async function middleware(request: NextRequest) {
   const { pathname } = request.nextUrl
 
-  // Public token-based install pages — no auth at all.
-  if (pathname.startsWith('/install')) {
+  // Public pages that never require auth — the install flow uses a token
+  // in the URL, and /terms is the standalone data-collection disclosure.
+  if (pathname.startsWith('/install') || pathname === '/terms') {
     return NextResponse.next()
   }
 

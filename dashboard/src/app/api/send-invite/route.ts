@@ -21,6 +21,7 @@ export async function POST(request: NextRequest) {
     }
 
     const installUrl = `${process.env.NEXT_PUBLIC_APP_URL}/install/${employee.install_token}`
+    const termsUrl = `${process.env.NEXT_PUBLIC_APP_URL}/terms`
     const businessName = employee.businesses?.name || 'your company'
 
     const response = await fetch('https://api.resend.com/emails', {
@@ -47,16 +48,24 @@ export async function POST(request: NextRequest) {
                   ${businessName} is using Groundwork to understand how the team works. You've been added as <strong>${employee.role}</strong>.
                 </p>
                 <p style="margin: 0 0 24px; font-size: 14px; color: #6b7280; line-height: 1.6;">
-                  Groundwork runs quietly in the background and takes a screenshot every 30 seconds to classify what type of work you're doing. No keystrokes or personal data are recorded.
+                  Groundwork runs quietly in the background and captures a screenshot every 30 seconds to classify the kind of work you&rsquo;re doing. We do not record passwords, personal messages, or anything you type.
                 </p>
-                <a href="${installUrl}" style="display: block; background: #111827; color: white; text-align: center; padding: 12px 24px; border-radius: 8px; text-decoration: none; font-size: 14px; font-weight: 500; margin-bottom: 24px;">
-                  Download your installer
+                <p style="margin: 0 0 24px; font-size: 14px; color: #6b7280; line-height: 1.6;">
+                  Before you install, the link below will show you the full data-collection disclosure. You&rsquo;ll need to acknowledge it once before downloading.
+                </p>
+                <a href="${installUrl}" style="display: block; background: #111827; color: white; text-align: center; padding: 12px 24px; border-radius: 8px; text-decoration: none; font-size: 14px; font-weight: 500; margin-bottom: 16px;">
+                  Review and install
                 </a>
+                <p style="margin: 0 0 8px; font-size: 12px; color: #9ca3af; text-align: center;">
+                  This link is unique to you. Don&rsquo;t share it with others.
+                </p>
                 <p style="margin: 0; font-size: 12px; color: #9ca3af; text-align: center;">
-                  This link is unique to you. Don't share it with others.
+                  Want the disclosure first? <a href="${termsUrl}" style="color: #6b7280; text-decoration: underline;">Read it here</a>.
                 </p>
               </div>
-              <p style="text-align: center; font-size: 12px; color: #9ca3af; margin-top: 24px;">Groundwork · gwork.tech</p>
+              <p style="text-align: center; font-size: 12px; color: #9ca3af; margin-top: 24px;">
+                Groundwork · gwork.tech · <a href="${termsUrl}" style="color: #9ca3af; text-decoration: underline;">Data disclosure</a>
+              </p>
             </div>
           </body>
           </html>
