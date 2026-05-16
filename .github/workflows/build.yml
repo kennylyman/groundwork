@@ -39,7 +39,8 @@ jobs:
         run: pyinstaller agent/groundwork.spec --clean --distpath dist
 
       - name: Show dist contents
-        run: dir dist /s
+        shell: powershell
+        run: Get-ChildItem -Recurse dist
 
       - name: Upload executable as artifact
         uses: actions/upload-artifact@v4
