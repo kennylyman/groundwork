@@ -6,8 +6,8 @@ import { createServerClient } from '@supabase/ssr'
 // employee via a per-employee token).
 const AUTH_PAGES = new Set(['/login', '/signup'])
 
-// When an authed user without a business hits these, send them to /onboarding.
-// /onboarding itself is allowed for any authed user — the page handles the
+// When an authed user without a business hits these, send them to /team-onboarding.
+// /team-onboarding itself is allowed for any authed user — the page handles the
 // no-business UI inline.
 const REQUIRES_BUSINESS = new Set(['/'])
 
@@ -79,14 +79,14 @@ export async function middleware(request: NextRequest) {
     if (isAuthPage) {
       return redirectKeepingCookies(
         request,
-        hasBusiness ? '/' : '/onboarding',
+        hasBusiness ? '/' : '/team-onboarding',
         response
       )
     }
 
     // Authed user on / without a business → finish setup first.
     if (REQUIRES_BUSINESS.has(pathname) && !hasBusiness) {
-      return redirectKeepingCookies(request, '/onboarding', response)
+      return redirectKeepingCookies(request, '/team-onboarding', response)
     }
   }
 

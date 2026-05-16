@@ -68,7 +68,7 @@ export default function SignupPage() {
         install_token: crypto.randomUUID(),
       })
 
-      router.push('/onboarding')
+      router.push('/team-onboarding')
     } catch (err: any) {
       setError(err.message || 'Something went wrong')
     } finally {
