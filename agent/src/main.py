@@ -450,6 +450,16 @@ def run_capture_loop(config: dict) -> None:
         time.sleep(CAPTURE_INTERVAL)
 
 
+def _cleanup_update_orphans() -> None:
+    """Sweep up any half-finished update artifacts before doing anything
+    else. Safe to call on non-Windows / non-frozen builds (no-op)."""
+    try:
+        from updater import cleanup_update_orphans
+        cleanup_update_orphans(CONFIG_DIR, log)
+    except Exception as e:
+        log(f"orphan cleanup error: {e}")
+
+
 def _maybe_hard_update(config: dict) -> None:
     """Check /api/agent-version before the capture loop. If the current
     build is below the min_supported floor, perform_update() exits the
@@ -489,6 +499,11 @@ def main() -> None:
     log(f"Config dir: {CONFIG_DIR}")
 
     load_env_fallbacks()
+
+    # Clear out any half-finished update artifacts from a prior session
+    # before we touch anything else. If we got this far, the running exe
+    # is intact; we just need to tidy up.
+    _cleanup_update_orphans()
 
     try:
         config = load_or_activate_config()

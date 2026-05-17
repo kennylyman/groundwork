@@ -13,7 +13,7 @@
  */
 
 import { NextRequest, NextResponse } from 'next/server'
-import { createServerClient } from '@supabase/ssr'
+import { resolveEmployeeOwner } from '@/lib/auth'
 import { serverSupabase } from '@/lib/supabase'
 
 type RouteContext = { params: Promise<{ id: string }> }
@@ -34,24 +34,14 @@ export async function POST(request: NextRequest, ctx: RouteContext) {
       )
     }
 
-    // Auth check
-    const sessionClient = createServerClient(
-      process.env.NEXT_PUBLIC_SUPABASE_URL!,
-      process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!,
-      {
-        cookies: {
-          getAll() {
-            return request.cookies.getAll()
-          },
-          setAll() {
-            // no-op
-          },
-        },
-      }
-    )
-    const { data: { user } } = await sessionClient.auth.getUser()
-    if (!user) {
-      return NextResponse.json({ error: 'Not authenticated' }, { status: 401 })
+    // Auth + ownership in one shot. Previously this route only verified that
+    // the caller was logged in — any authenticated user could acknowledge
+    // any employee's role profile (and on `accept`, overwrite that
+    // employee's role). resolveEmployeeOwner confirms the employee belongs
+    // to the caller's business.
+    const owner = await resolveEmployeeOwner(request, employeeId)
+    if (!owner) {
+      return NextResponse.json({ error: 'Not authorized' }, { status: 401 })
     }
 
     const supabase = serverSupabase()

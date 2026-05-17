@@ -67,6 +67,14 @@ export async function GET(request: NextRequest) {
     }
   }
 
+  // Cache policy: with employee_id present, the agent is checking in for
+  // a heartbeat — we MUST hit the server every time so employees.agent_version
+  // gets recorded. Without employee_id (a polling client like the settings
+  // page), 60s edge cache is fine.
+  const cacheControl = employeeId
+    ? 'no-store'
+    : 'public, max-age=60, s-maxage=60'
+
   return NextResponse.json(
     {
       latest_version: latest?.version ?? null,
@@ -77,10 +85,7 @@ export async function GET(request: NextRequest) {
     },
     {
       headers: {
-        // Short cache — release promotions should propagate within a
-        // minute. Agents check on startup + once per capture loop tick
-        // at idle, so 60s upstream cache is plenty.
-        'Cache-Control': 'public, max-age=60, s-maxage=60',
+        'Cache-Control': cacheControl,
       },
     }
   )

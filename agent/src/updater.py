@@ -20,12 +20,22 @@ Public entry points used by main.py:
 
 The update mechanic uses a .bat file that:
   1. Waits 3s for the old agent to exit.
-  2. Moves the current exe to <name>.old.exe (with retries — Windows file
-     locks linger briefly after process exit).
-  3. Moves the freshly-downloaded .new.exe into place.
-  4. Spawns the new agent.
-  5. Waits 30s and checks the new agent is still running. If not, rolls
-     back to the old exe and starts it.
+  2. Stages the new exe next to the old one (COPY, so it lives on the
+     same NTFS volume — necessary for the atomic replace in step 4).
+  3. Backs up the live exe via COPY (the live file stays intact through
+     this step, eliminating the "no exe" crash window the prior
+     move-rename approach had).
+  4. Replaces the live exe via `move /Y` (NTFS MoveFileEx, atomic — the
+     target is either the old or new bytes, never absent).
+  5. Spawns the new agent.
+  6. Waits 30s and checks the new agent is still running. If not, rolls
+     back from the backup (also via atomic move).
+
+On startup, cleanup_update_orphans() removes stale .new / .failed files
+left behind by an interrupted update. The current exe is always intact
+when we reach this point (otherwise it couldn't have started), so the
+cleanup is purely housekeeping — the next update check will re-download
+if needed.
 """
 
 from __future__ import annotations
@@ -37,6 +47,7 @@ import sys
 import time
 from pathlib import Path
 from typing import Callable, Literal
+from urllib.parse import urlparse
 
 import requests
 
@@ -44,6 +55,22 @@ import requests
 ReleaseInfo = dict
 LogFn = Callable[[str], None]
 UpdateAction = Literal["hard", "soft", "none"]
+
+# Defense in depth: even if SUPABASE_SERVICE_ROLE_KEY leaks and an attacker
+# registers a malicious release row, the agent refuses to download from
+# anywhere except GitHub. The sha256 verification handles content-level
+# tampering at GitHub; this allowlist handles destination tampering at
+# Supabase.
+#
+# GitHub Release downloads start at github.com but 302-redirect to
+# objects.githubusercontent.com to serve the actual asset bytes, so both
+# hosts (and their subdomains) need to be allowed.
+ALLOWED_DOWNLOAD_HOST_SUFFIXES = ("github.com", "githubusercontent.com")
+
+# Hard upper bound on the binary size. Today's exe is ~30 MB. 100 MB gives
+# room for growth (extra deps, debug info) without letting a malicious or
+# broken download_url fill the user's disk.
+MAX_DOWNLOAD_BYTES = 100 * 1024 * 1024
 
 
 # ---------------------------------------------------------------- version --
@@ -125,17 +152,83 @@ def _sha256_of_file(path: Path) -> str:
     return h.hexdigest()
 
 
+def _is_safe_download_url(url: str | None) -> tuple[bool, str]:
+    """Validate scheme is https and host is one of the GitHub-owned suffixes.
+    Returns (ok, reason). Handles initial URL and post-redirect URL.
+    """
+    if not isinstance(url, str) or not url:
+        return False, "empty url"
+    try:
+        parsed = urlparse(url)
+    except Exception as e:
+        return False, f"unparseable url: {e}"
+    if parsed.scheme != "https":
+        return False, f"non-https scheme: {parsed.scheme!r}"
+    host = (parsed.hostname or "").lower()
+    if not host:
+        return False, "no host"
+    for suffix in ALLOWED_DOWNLOAD_HOST_SUFFIXES:
+        if host == suffix or host.endswith("." + suffix):
+            return True, ""
+    return False, f"untrusted host: {host!r}"
+
+
 def _download_to(url: str, dest: Path, log: LogFn) -> bool:
     log(f"update: downloading {url}")
+
+    ok, reason = _is_safe_download_url(url)
+    if not ok:
+        log(f"update: refusing download — {reason}")
+        return False
+
     try:
         with requests.get(url, stream=True, timeout=120, allow_redirects=True) as r:
             if r.status_code != 200:
                 log(f"update: download HTTP {r.status_code}")
                 return False
+
+            # Defense in depth: if the redirect chain landed somewhere
+            # other than https://github.com/, refuse. requests.url is the
+            # FINAL URL after redirects.
+            final_ok, final_reason = _is_safe_download_url(r.url)
+            if not final_ok:
+                log(f"update: refusing — redirect went off-host: {final_reason} ({r.url})")
+                return False
+
+            # Bound the download before we start writing. A malicious or
+            # broken endpoint could otherwise stream forever and fill the
+            # user's disk.
+            content_length_raw = r.headers.get("Content-Length")
+            if content_length_raw:
+                try:
+                    declared = int(content_length_raw)
+                except ValueError:
+                    declared = -1
+                if declared > MAX_DOWNLOAD_BYTES:
+                    log(
+                        f"update: refusing — Content-Length {declared} "
+                        f"exceeds cap {MAX_DOWNLOAD_BYTES}"
+                    )
+                    return False
+
+            written = 0
             with open(dest, "wb") as f:
                 for chunk in r.iter_content(chunk_size=65536):
-                    if chunk:
-                        f.write(chunk)
+                    if not chunk:
+                        continue
+                    written += len(chunk)
+                    if written > MAX_DOWNLOAD_BYTES:
+                        log(
+                            f"update: aborting — stream exceeded cap "
+                            f"{MAX_DOWNLOAD_BYTES} bytes mid-download"
+                        )
+                        f.close()
+                        try:
+                            dest.unlink()
+                        except Exception:
+                            pass
+                        return False
+                    f.write(chunk)
         log(f"update: downloaded {dest} ({dest.stat().st_size} bytes)")
         return True
     except Exception as e:
@@ -149,11 +242,24 @@ _UPDATER_BAT = r"""@echo off
 setlocal enabledelayedexpansion
 
 REM Groundwork auto-updater.
-REM Args: %1 = current exe path, %2 = new exe path
+REM
+REM Strategy: never have a moment where the live exe is missing.
+REM   1. COPY new exe (in APPDATA) → STAGED file next to the live exe
+REM      (so it's on the same NTFS volume — required for atomic move in step 4).
+REM   2. COPY live exe → BACKUP (the live file stays in place; nothing
+REM      destructive yet, so a crash here is a no-op).
+REM   3. MOVE staged → live. On NTFS this uses MoveFileEx + REPLACE_EXISTING,
+REM      which is atomic — the target file is either the old bytes or the
+REM      new bytes, never absent. This is the only step that mutates the
+REM      live exe path, and it does so atomically.
+REM   4. Start the new agent; clean up the staging copy in APPDATA.
+REM
+REM Args: %1 = live exe path, %2 = freshly-downloaded exe (in APPDATA)
 
 set "OLD_EXE=%~1"
 set "NEW_EXE=%~2"
 set "BACKUP_EXE=%~1.old"
+set "STAGED_EXE=%~1.new"
 set "LOG=%~dp0updater.log"
 
 echo [%date% %time%] updater start old=%OLD_EXE% new=%NEW_EXE% >> "%LOG%"
@@ -161,36 +267,53 @@ echo [%date% %time%] updater start old=%OLD_EXE% new=%NEW_EXE% >> "%LOG%"
 REM Let the old agent fully exit and release its file lock.
 timeout /t 3 /nobreak >nul
 
-REM Rename current exe to backup. File locks can linger; retry briefly.
+REM --- Step 1: stage the new exe next to the old one ---------------------
+copy /Y "%NEW_EXE%" "%STAGED_EXE%" >nul 2>&1
+if !errorlevel! neq 0 (
+    echo [%date% %time%] FAIL: could not stage new exe >> "%LOG%"
+    exit /b 1
+)
+
+REM --- Step 2: backup the live exe (non-destructive copy) ----------------
+copy /Y "%OLD_EXE%" "%BACKUP_EXE%" >nul 2>&1
+if !errorlevel! neq 0 (
+    echo [%date% %time%] FAIL: could not back up live exe >> "%LOG%"
+    del /F /Q "%STAGED_EXE%" >nul 2>&1
+    exit /b 1
+)
+
+REM --- Step 3: atomic replace via NTFS MoveFileEx ------------------------
+REM Even after the 3s wait above, the prior process's file handle can
+REM linger. Retry the atomic replace for up to 15s.
 set RETRIES=0
-:retry_rename_current
-move /Y "%OLD_EXE%" "%BACKUP_EXE%" >nul 2>&1
+:retry_replace
+move /Y "%STAGED_EXE%" "%OLD_EXE%" >nul 2>&1
 if !errorlevel! neq 0 (
     set /a RETRIES+=1
     if !RETRIES! lss 15 (
         timeout /t 1 /nobreak >nul
-        goto retry_rename_current
+        goto retry_replace
     )
-    echo [%date% %time%] FAIL: could not rename current exe >> "%LOG%"
+    echo [%date% %time%] FAIL: atomic replace failed after retries >> "%LOG%"
+    del /F /Q "%STAGED_EXE%" >nul 2>&1
     exit /b 1
 )
 
-REM Move new exe into place.
-move /Y "%NEW_EXE%" "%OLD_EXE%" >nul 2>&1
-if !errorlevel! neq 0 (
-    echo [%date% %time%] FAIL: could not move new exe — rolling back >> "%LOG%"
-    move /Y "%BACKUP_EXE%" "%OLD_EXE%" >nul 2>&1
-    exit /b 1
-)
-
+REM --- Step 4: launch + cleanup ------------------------------------------
 echo [%date% %time%] starting new agent >> "%LOG%"
 start "" "%OLD_EXE%"
 
-REM Watchdog: confirm the new agent is alive 30s after launch.
+REM The .new.exe in APPDATA was the source for the stage; we copied
+REM not moved, so it's still there. Remove it now that the swap is done.
+del /F /Q "%NEW_EXE%" >nul 2>&1
+
+REM --- Watchdog: confirm the new agent is alive 30s after launch ---------
 timeout /t 30 /nobreak >nul
 tasklist /FI "IMAGENAME eq Groundwork.exe" 2>nul | find /i "Groundwork.exe" >nul
 if !errorlevel! neq 0 (
     echo [%date% %time%] new agent did not survive — rolling back >> "%LOG%"
+    REM Move the failing exe aside so the agent's startup orphan cleanup
+    REM can see it; then restore the backup via atomic move.
     if exist "%OLD_EXE%" move /Y "%OLD_EXE%" "%~1.failed" >nul 2>&1
     move /Y "%BACKUP_EXE%" "%OLD_EXE%" >nul 2>&1
     start "" "%OLD_EXE%"
@@ -200,6 +323,37 @@ if !errorlevel! neq 0 (
 echo [%date% %time%] update succeeded >> "%LOG%"
 exit /b 0
 """
+
+
+def cleanup_update_orphans(config_dir: Path, log: LogFn) -> None:
+    """Remove stale update artifacts at agent startup.
+
+    Possible orphans:
+      - <config_dir>/agent.new.exe — Python wrote it during a download but
+        the bat never consumed it.
+      - <exe>.new — the bat copied the new bytes to stage but didn't
+        complete the atomic replace.
+      - <exe>.failed — a watchdog rollback moved a failing new exe aside.
+
+    The current exe is always intact when we reach this code (otherwise the
+    agent couldn't have started). The regular update check will re-attempt
+    cleanly if an update is still needed, so it's safe to just delete
+    these artifacts.
+    """
+    if sys.platform != "win32":
+        return
+    candidates: list[Path] = [config_dir / "agent.new.exe"]
+    if getattr(sys, "frozen", False):
+        exe = Path(sys.executable)
+        candidates.append(exe.with_name(exe.name + ".new"))
+        candidates.append(exe.with_name(exe.name + ".failed"))
+    for p in candidates:
+        try:
+            if p.exists():
+                p.unlink()
+                log(f"update: cleaned up orphan {p.name}")
+        except Exception as e:
+            log(f"update: could not clean up {p.name}: {e}")
 
 
 def _write_updater_bat(config_dir: Path) -> Path:
