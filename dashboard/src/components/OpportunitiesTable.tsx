@@ -10,8 +10,19 @@ import {
   Filter,
   ChevronRight,
   Sparkles,
+  CheckCircle2,
 } from 'lucide-react'
 import { supabase, Employee } from '@/lib/supabase'
+
+type CapabilityPattern = {
+  capability_id?: string
+  key_params?: Record<string, string>
+  integration_evidence?: {
+    verified_via_zapier?: boolean
+    total_events?: number
+    tools?: Array<{ tool: string; event_count: number }>
+  }
+}
 
 type OpportunityRow = {
   id: string
@@ -26,6 +37,7 @@ type OpportunityRow = {
   confidence: number
   status: string
   automation_class: 'A' | 'B' | 'C' | null
+  capability_pattern: CapabilityPattern | null
   first_detected_at: string
   last_seen_at: string
 }
@@ -213,6 +225,9 @@ function OpportunityRowView({
   const automation = opp.automation_class
     ? CLASS_LABEL[opp.automation_class]
     : null
+  const verifiedViaZapier =
+    !!opp.capability_pattern?.integration_evidence?.verified_via_zapier
+  const eventCount = opp.capability_pattern?.integration_evidence?.total_events ?? 0
 
   return (
     <Link
@@ -228,6 +243,15 @@ function OpportunityRowView({
           >
             {opp.status}
           </span>
+          {verifiedViaZapier && (
+            <span
+              title={`Confirmed by ${eventCount} Zapier event${eventCount === 1 ? '' : 's'}`}
+              className="shrink-0 inline-flex items-center gap-0.5 text-[10px] uppercase tracking-wider font-semibold px-1.5 py-0.5 rounded border bg-emerald-50 text-emerald-700 border-emerald-200"
+            >
+              <CheckCircle2 className="w-2.5 h-2.5" />
+              Verified
+            </span>
+          )}
         </div>
         <div className="flex items-center gap-3 text-xs text-gray-500">
           {employee && (

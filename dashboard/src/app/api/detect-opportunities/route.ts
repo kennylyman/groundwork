@@ -179,11 +179,68 @@ function scoreConfidence(
 
 // ----- Core detection ------------------------------------------------------
 
+type IntegrationEventSummary = {
+  tool_name: string
+  event_count: number
+  event_types: string[]
+  last_event_at: string
+}
+
+/**
+ * Pull recent Zapier-style events for a business, grouped by tool. The
+ * scorer uses these to BOOST CONFIDENCE on capability buckets whose
+ * params reference a tool with active events — events are harder evidence
+ * than capture inference. We deliberately don't inflate occurrence_count
+ * or estimated_weekly_minutes from events, so dollar figures stay
+ * grounded in observed time.
+ */
+async function loadEventsByTool(
+  supabase: ReturnType<typeof serverSupabase>,
+  businessId: string,
+  windowStartIso: string
+): Promise<Map<string, IntegrationEventSummary>> {
+  const { data, error } = await supabase
+    .from('integration_events')
+    .select('tool_name, event_type, occurred_at')
+    .eq('business_id', businessId)
+    .gte('occurred_at', windowStartIso)
+
+  if (error) {
+    console.error('detect-opportunities: integration_events read failed', error)
+    return new Map()
+  }
+
+  const byTool = new Map<string, IntegrationEventSummary>()
+  for (const row of data ?? []) {
+    const tool = (row.tool_name || '').toLowerCase()
+    if (!tool) continue
+    const existing = byTool.get(tool)
+    if (existing) {
+      existing.event_count += 1
+      if (!existing.event_types.includes(row.event_type)) {
+        existing.event_types.push(row.event_type)
+      }
+      if (row.occurred_at > existing.last_event_at) {
+        existing.last_event_at = row.occurred_at
+      }
+    } else {
+      byTool.set(tool, {
+        tool_name: tool,
+        event_count: 1,
+        event_types: [row.event_type],
+        last_event_at: row.occurred_at,
+      })
+    }
+  }
+  return byTool
+}
+
 async function detectForEmployee(
   supabase: ReturnType<typeof serverSupabase>,
   employee: EmployeeRow,
   windowStartIso: string,
-  rateOverrides: Record<string, number>
+  rateOverrides: Record<string, number>,
+  eventsByTool: Map<string, IntegrationEventSummary>
 ): Promise<DetectedOpportunity[]> {
   const { data: captures, error } = await supabase
     .from('captures')
@@ -257,7 +314,39 @@ async function detectForEmployee(
     const annualSavings = Math.round(annualCost * SAVINGS_RATE)
 
     const avgConf = b.occurrenceCount > 0 ? b.confidenceSum / b.occurrenceCount : 0
-    const confidence = scoreConfidence(b.occurrenceCount, avgConf)
+    let confidence = scoreConfidence(b.occurrenceCount, avgConf)
+
+    // Integration-event boost: if any tool referenced in this bucket's
+    // key_params has Zapier events in the window, raise confidence.
+    // The boost is capped — events are corroboration, not new evidence
+    // of cost (we don't touch occurrence_count or savings).
+    const toolsInPattern = Object.values(b.keyParams).filter(
+      (v): v is string => typeof v === 'string' && v.length > 0
+    )
+    const matchedEvents: IntegrationEventSummary[] = []
+    for (const t of toolsInPattern) {
+      const ev = eventsByTool.get(t)
+      if (ev) matchedEvents.push(ev)
+    }
+    let integrationEvidence: Record<string, unknown> | null = null
+    if (matchedEvents.length > 0) {
+      const totalEvents = matchedEvents.reduce((s, e) => s + e.event_count, 0)
+      // Cap the bump at +0.20 confidence so the model can never assert
+      // "high confidence" purely on events without supporting captures.
+      const eventBoost = Math.min(0.2, 0.05 * Math.log1p(totalEvents))
+      confidence = Math.round(Math.min(1, confidence + eventBoost) * 1000) / 1000
+      integrationEvidence = {
+        verified_via_zapier: true,
+        total_events: totalEvents,
+        tools: matchedEvents.map((e) => ({
+          tool: e.tool_name,
+          event_count: e.event_count,
+          event_types: e.event_types.slice(0, 5),
+          last_event_at: e.last_event_at,
+        })),
+        boost: eventBoost,
+      }
+    }
 
     const { title, description } = describePattern(b.capabilityId, b.keyParams)
 
@@ -277,6 +366,7 @@ async function detectForEmployee(
         key_params: b.keyParams,
         params_example: b.fullParamsExample,
         representative_capture_ids: b.representativeCaptureIds,
+        ...(integrationEvidence ? { integration_evidence: integrationEvidence } : {}),
       },
       occurrence_count: b.occurrenceCount,
       estimated_weekly_minutes: Math.round(observedMinutes),
@@ -344,9 +434,14 @@ async function handle(req: NextRequest) {
     let totalEmployeesProcessed = 0
     const errors: string[] = []
 
-    // Cache rate overrides per business so we don't re-fetch for every
-    // employee in the same business.
+    // Cache rate overrides + event summaries per business so we don't
+    // re-fetch for every employee in the same business.
     const ratesByBusiness = new Map<string, Record<string, number>>()
+    const eventsByBusiness = new Map<
+      string,
+      Map<string, IntegrationEventSummary>
+    >()
+
     async function getOverrides(bizId: string) {
       const cached = ratesByBusiness.get(bizId)
       if (cached) return cached
@@ -354,11 +449,25 @@ async function handle(req: NextRequest) {
       ratesByBusiness.set(bizId, fetched)
       return fetched
     }
+    async function getEvents(bizId: string) {
+      const cached = eventsByBusiness.get(bizId)
+      if (cached) return cached
+      const fetched = await loadEventsByTool(supabase, bizId, windowStart)
+      eventsByBusiness.set(bizId, fetched)
+      return fetched
+    }
 
     for (const emp of employees as EmployeeRow[]) {
       try {
         const overrides = await getOverrides(emp.business_id)
-        const detected = await detectForEmployee(supabase, emp, windowStart, overrides)
+        const events = await getEvents(emp.business_id)
+        const detected = await detectForEmployee(
+          supabase,
+          emp,
+          windowStart,
+          overrides,
+          events
+        )
         const upserted = await upsertOpportunities(supabase, detected)
         totalDetected += upserted
         totalEmployeesProcessed += 1
