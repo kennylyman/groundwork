@@ -3,7 +3,7 @@
   "crons": [
     {
       "path": "/api/detect-opportunities",
-      "schedule": "0 * * * *"
+      "schedule": "0 1 * * *"
     },
     {
       "path": "/api/discover-roles",
