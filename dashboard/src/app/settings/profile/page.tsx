@@ -1,8 +1,9 @@
 'use client'
 
 import { useEffect, useState } from 'react'
-import { supabase } from '@/lib/supabase'
+import { useRouter } from 'next/navigation'
 import Link from 'next/link'
+import { supabase } from '@/lib/supabase'
 import {
   Sparkles,
   Save,
@@ -11,7 +12,7 @@ import {
   Loader2,
   CheckCircle2,
   AlertCircle,
-  ExternalLink,
+  RefreshCw,
 } from 'lucide-react'
 
 type ToolEntry = { name: string; used_for: string[] }
@@ -48,11 +49,13 @@ const EMPTY: EditableState = {
 }
 
 export default function ProfileSettingsPage() {
+  const router = useRouter()
   const [state, setState] = useState<EditableState>(EMPTY)
   const [meta, setMeta] = useState<Meta | null>(null)
   const [exists, setExists] = useState(false)
   const [loading, setLoading] = useState(true)
   const [saving, setSaving] = useState(false)
+  const [restartingIntake, setRestartingIntake] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [savedAt, setSavedAt] = useState<number | null>(null)
   // Compliance edited as a comma-separated string so the input stays simple.
@@ -61,6 +64,24 @@ export default function ProfileSettingsPage() {
   useEffect(() => {
     void load()
   }, [])
+
+  async function restartIntake() {
+    // Clear intake_completed_at + intake_skipped_at server-side so the
+    // /team-onboarding page renders the IntakeChat again. Existing
+    // profile fields (tool_stack, workflows, pain_points, etc.) are
+    // preserved — the rerun augments rather than wipes.
+    setRestartingIntake(true)
+    setError(null)
+    try {
+      const r = await fetch('/api/intake/restart', { method: 'POST' })
+      const body = await r.json().catch(() => ({}))
+      if (!r.ok) throw new Error(body.error || `HTTP ${r.status}`)
+      router.push('/team-onboarding')
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'unknown error')
+      setRestartingIntake(false)
+    }
+  }
 
   async function load() {
     setLoading(true)
@@ -192,14 +213,20 @@ export default function ProfileSettingsPage() {
                 : 'No intake on file yet'}
             </p>
           </div>
-          <Link
-            href="/team-onboarding"
-            className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-gray-600 bg-gray-100 rounded-lg hover:bg-gray-200"
-            title="Re-run intake to refresh fields"
+          <button
+            type="button"
+            onClick={restartIntake}
+            disabled={restartingIntake}
+            className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-gray-600 bg-gray-100 rounded-lg hover:bg-gray-200 disabled:opacity-50"
+            title="Restart the intake conversation to update business context"
           >
-            <ExternalLink className="w-3.5 h-3.5" />
-            Re-run intake
-          </Link>
+            {restartingIntake ? (
+              <Loader2 className="w-3.5 h-3.5 animate-spin" />
+            ) : (
+              <RefreshCw className="w-3.5 h-3.5" />
+            )}
+            {restartingIntake ? 'Restarting…' : 'Re-run intake'}
+          </button>
         </div>
       </div>
 

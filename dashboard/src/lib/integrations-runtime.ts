@@ -34,6 +34,11 @@ import {
   type ToolCallContext,
 } from './integrations/adapters'
 
+/** Caller tag — labels the source of the tool call in audit logs.
+ *  "enrichment" = enrich-captures cron, "automation" = Phase 5 executor,
+ *  "manual" = ad-hoc dashboard action, "unknown" = uncategorized. */
+type CallerTag = 'enrichment' | 'automation' | 'manual' | 'unknown'
+
 export type CallToolResult<T = unknown> =
   | { ok: true; result: T }
   | {
@@ -65,6 +70,84 @@ type IntegrationRow = {
  *  gives us enough margin to survive clock skew + the operation's own
  *  duration without the access token dying mid-call. */
 const REFRESH_SAFETY_MS = 5 * 60 * 1000
+
+/** Keys that look like secrets — stripped from args before audit logging.
+ *  Pattern match: anything containing "token", "secret", "key", "password",
+ *  "auth" (case-insensitive). The runtime never persists these. */
+const SECRET_KEY_RE = /token|secret|key|password|auth/i
+
+function sanitizeArgs(args: Record<string, unknown>): Record<string, unknown> {
+  const out: Record<string, unknown> = {}
+  for (const [k, v] of Object.entries(args)) {
+    if (SECRET_KEY_RE.test(k)) {
+      out[k] = '[redacted]'
+      continue
+    }
+    if (typeof v === 'string' && v.length > 200) {
+      // Long strings often carry body content we don't need in the audit
+      // log. Truncate to keep rows reasonable.
+      out[k] = v.slice(0, 200) + '…'
+    } else if (typeof v === 'object' && v !== null) {
+      // One level deep; deeper nesting falls through as-is.
+      out[k] = sanitizeArgs(v as Record<string, unknown>)
+    } else {
+      out[k] = v
+    }
+  }
+  return out
+}
+
+function summarizeResult(result: unknown): string {
+  if (result == null) return ''
+  if (typeof result !== 'object') return String(result).slice(0, 200)
+  const r = result as Record<string, unknown>
+  // Common shapes:
+  //   { messages: [...] }    -> "messages: N"
+  //   { events: [...] }      -> "events: N"
+  //   { id: "..." }          -> "id: <prefix>"
+  //   anything else          -> first 200 chars of JSON
+  const parts: string[] = []
+  for (const [k, v] of Object.entries(r)) {
+    if (Array.isArray(v)) {
+      parts.push(`${k}: ${v.length}`)
+    } else if (typeof v === 'string' && v.length > 0) {
+      parts.push(`${k}: ${v.slice(0, 40)}`)
+    }
+    if (parts.length >= 3) break
+  }
+  if (parts.length > 0) return parts.join(' · ')
+  return JSON.stringify(r).slice(0, 200)
+}
+
+/** Best-effort write to tool_call_logs. Never blocks the caller — if the
+ *  insert fails, we log and move on. Audit is for the 99% case, not for
+ *  hard guarantees. */
+async function recordCall(input: {
+  businessId: string
+  toolName: string
+  operation: string
+  args: Record<string, unknown>
+  status: string
+  resultSummary: string
+  durationMs: number
+  caller: CallerTag
+}): Promise<void> {
+  try {
+    const supabase = serverSupabase()
+    await supabase.from('tool_call_logs').insert({
+      business_id: input.businessId,
+      tool_name: input.toolName,
+      operation: input.operation,
+      args: sanitizeArgs(input.args),
+      status: input.status,
+      result_summary: input.resultSummary.slice(0, 500),
+      duration_ms: input.durationMs,
+      caller: input.caller,
+    })
+  } catch (e) {
+    console.error('recordCall: insert failed', e)
+  }
+}
 
 async function loadIntegration(
   businessId: string,
@@ -191,14 +274,36 @@ export async function callTool<T = unknown>(
   businessId: string,
   toolName: string,
   operation: string,
-  args: Record<string, unknown> = {}
+  args: Record<string, unknown> = {},
+  caller: CallerTag = 'unknown'
 ): Promise<CallToolResult<T>> {
+  const startedAtAll = Date.now()
   const adapter = getAdapter(toolName)
   if (!adapter) {
+    await recordCall({
+      businessId,
+      toolName,
+      operation,
+      args,
+      status: 'no_adapter',
+      resultSummary: `no adapter for tool ${toolName}`,
+      durationMs: Date.now() - startedAtAll,
+      caller,
+    })
     return { ok: false, error: `no adapter for tool ${toolName}`, code: 'no_adapter' }
   }
   const op = adapter.operations[operation]
   if (!op) {
+    await recordCall({
+      businessId,
+      toolName,
+      operation,
+      args,
+      status: 'no_operation',
+      resultSummary: `unknown operation ${operation}`,
+      durationMs: Date.now() - startedAtAll,
+      caller,
+    })
     return {
       ok: false,
       error: `adapter ${toolName} has no operation ${operation}`,
@@ -208,6 +313,16 @@ export async function callTool<T = unknown>(
 
   const integration = await loadIntegration(businessId, toolName)
   if (!integration || !integration.access_token_encrypted) {
+    await recordCall({
+      businessId,
+      toolName,
+      operation,
+      args,
+      status: 'not_connected',
+      resultSummary: 'no integration row with access token',
+      durationMs: Date.now() - startedAtAll,
+      caller,
+    })
     return {
       ok: false,
       error: `${toolName} not connected for business ${businessId}`,
@@ -249,11 +364,20 @@ export async function callTool<T = unknown>(
   try {
     const result = await op(ctx, args)
     const ms = Date.now() - startedAt
-    // Light call log so we can spot regressions / unusual latencies in
-    // Vercel function logs without committing to a separate DB table yet.
+    const summary = summarizeResult(result)
     console.log(
       `callTool ok tool=${toolName} op=${operation} business=${businessId} ms=${ms}`
     )
+    await recordCall({
+      businessId,
+      toolName,
+      operation,
+      args,
+      status: 'ok',
+      resultSummary: summary,
+      durationMs: ms,
+      caller,
+    })
     return { ok: true, result: result as T }
   } catch (err) {
     const ms = Date.now() - startedAt
@@ -261,6 +385,16 @@ export async function callTool<T = unknown>(
     console.error(
       `callTool fail tool=${toolName} op=${operation} business=${businessId} ms=${ms} err=${message}`
     )
+    await recordCall({
+      businessId,
+      toolName,
+      operation,
+      args,
+      status: 'operation_failed',
+      resultSummary: message,
+      durationMs: ms,
+      caller,
+    })
     return { ok: false, error: message, code: 'operation_failed' }
   }
 }

@@ -188,6 +188,32 @@ async function handle(req: NextRequest) {
       continue
     }
     enriched += 1
+
+    // Synthesize integration_events rows from this enrichment so the
+    // opportunity detector's verified-via-events confidence boost fires
+    // for native OAuth integrations the same way it does for Zapier.
+    // Closes gaps 2 + 3: emits one event per "useful signal" the adapter
+    // returned, keyed by the matched surface so capability key_params
+    // can join (e.g., a Teams capture writes tool_name='teams' not
+    // 'microsoft-365' so the detector matches the same vocabulary as
+    // existing per-product detections).
+    if (payload && !payload.error) {
+      const events = synthesizeEvents(
+        cap,
+        chosenAdapter.toolName,
+        chosenAdapterRow.id,
+        payload
+      )
+      if (events.length > 0) {
+        const { error: evErr } = await supabase
+          .from('integration_events')
+          .insert(events)
+        if (evErr) {
+          // Non-fatal — the enrichment landed, the events are extra.
+          console.error('enrich-captures: events insert failed', evErr)
+        }
+      }
+    }
   }
 
   return NextResponse.json({
@@ -198,6 +224,100 @@ async function handle(req: NextRequest) {
     adapters: listAdapters().map((a) => a.toolName),
     errors: errors.length ? errors : undefined,
   })
+}
+
+/** Build integration_events rows for the opportunity detector's
+ *  verified-via-events boost. One event per useful signal in the
+ *  adapter's payload, keyed by the matched surface so per-product
+ *  detections (outlook / teams / gmail / etc) join correctly with
+ *  capability key_params.
+ *
+ *  event_type uses a "native.<source>" namespace so future code can
+ *  distinguish synthesized events from real Zapier events. */
+function synthesizeEvents(
+  capture: CaptureForEnrichment,
+  toolName: string,
+  integrationId: string,
+  payload: Record<string, unknown>
+): Array<{
+  business_id: string
+  integration_id: string
+  employee_id: string
+  capture_id: string
+  tool_name: string
+  event_type: string
+  event_data: Record<string, unknown>
+  occurred_at: string
+}> {
+  type Row = ReturnType<typeof synthesizeEvents>[number]
+  const out: Row[] = []
+  const surface =
+    (payload.surface as string | undefined) ?? toolName
+
+  // Per-adapter mapping from payload shape -> event rows. We bound
+  // event_data to ~1KB so a 200-msg Slack channel history doesn't bloat
+  // the table — the boost only cares whether events exist + their
+  // count, not the full content.
+
+  if (toolName === 'slack') {
+    const messages = (payload.messages as Array<unknown> | undefined) ?? []
+    if (messages.length > 0) {
+      out.push({
+        business_id: capture.business_id,
+        integration_id: integrationId,
+        employee_id: capture.employee_id,
+        capture_id: capture.id,
+        tool_name: 'slack',
+        event_type: 'native.slack.channel_active',
+        event_data: { message_count: messages.length },
+        occurred_at: capture.captured_at,
+      })
+    }
+  } else if (toolName === 'microsoft-365' || toolName === 'google-workspace') {
+    const cal = (payload.calendar_events as Array<unknown> | undefined) ?? []
+    const mail = (payload.unread_emails as Array<unknown> | undefined) ?? []
+    // Map M365/Google to the per-product tool_name vocabulary the
+    // detector uses elsewhere. captures.software for an Outlook capture
+    // normalizes to 'outlook'; a capture in Teams to 'teams'; Gmail
+    // captures to 'gmail'. We mirror that here.
+    let perProduct: string
+    if (toolName === 'microsoft-365') {
+      perProduct =
+        surface === 'teams' ? 'teams' : surface === 'outlook' ? 'outlook' : 'outlook'
+    } else {
+      perProduct =
+        surface === 'calendar' ? 'google-calendar' :
+        surface === 'drive' ? 'google-drive' :
+        surface === 'docs' || surface === 'sheets' || surface === 'slides' ? 'google-drive' :
+        'gmail'
+    }
+    if (cal.length > 0) {
+      out.push({
+        business_id: capture.business_id,
+        integration_id: integrationId,
+        employee_id: capture.employee_id,
+        capture_id: capture.id,
+        tool_name: perProduct,
+        event_type: `native.${toolName}.calendar`,
+        event_data: { event_count: cal.length },
+        occurred_at: capture.captured_at,
+      })
+    }
+    if (mail.length > 0) {
+      out.push({
+        business_id: capture.business_id,
+        integration_id: integrationId,
+        employee_id: capture.employee_id,
+        capture_id: capture.id,
+        tool_name: perProduct,
+        event_type: `native.${toolName}.unread`,
+        event_data: { message_count: mail.length },
+        occurred_at: capture.captured_at,
+      })
+    }
+  }
+
+  return out
 }
 
 export const GET = handle

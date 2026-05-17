@@ -2,6 +2,7 @@
 
 import { useEffect, useState } from 'react'
 import { supabase, Employee, Capture } from '@/lib/supabase'
+import { CaptureEnrichmentSummary } from '@/components/CaptureEnrichmentSummary'
 import { Zap, Clock, Activity, TrendingUp } from 'lucide-react'
 import { use } from 'react'
 import { PauseToggle, PausedBadge } from '@/components/PauseToggle'
@@ -229,6 +230,10 @@ export default function EmployeePage({ params }: { params: Promise<{ id: string 
                 <div className="flex-1 min-w-0">
                   <p className="text-xs text-gray-800">{cap.task}</p>
                   <p className="text-xs text-gray-400 mt-0.5">{cap.category} · {cap.software}</p>
+                  <CaptureEnrichmentSummary
+                    enrichments={cap.capture_enrichments}
+                    variant="inline"
+                  />
                 </div>
                 <div className="flex items-center gap-2 shrink-0">
                   <span className={`text-xs px-2 py-0.5 rounded-full border font-medium ${AUTOMATION_COLORS[cap.automation_potential] || ''}`}>

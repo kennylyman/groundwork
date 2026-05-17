@@ -13,8 +13,11 @@
  */
 'use client'
 
-import { X, Users, Clock, DollarSign, Zap, TrendingUp } from 'lucide-react'
+import { useEffect, useState } from 'react'
+import { X, Users, Clock, DollarSign, Zap, TrendingUp, Sparkles } from 'lucide-react'
 import { useCapabilities } from '@/lib/capabilities-client'
+import { supabase, type CaptureEnrichments } from '@/lib/supabase'
+import { CaptureEnrichmentSummary } from './CaptureEnrichmentSummary'
 import type {
   EmployeeNode,
   WorkflowCluster,
@@ -36,6 +39,8 @@ function fmtMoney(n: number): string {
   return '$' + n.toLocaleString('en-US')
 }
 
+type EnrichmentByPair = Record<string, CaptureEnrichments | null>
+
 export function WorkflowClusterPanel({
   cluster,
   employees,
@@ -48,6 +53,65 @@ export function WorkflowClusterPanel({
   const { capabilityLabel } = useCapabilities()
   const empById = new Map(employees.map((e) => [e.id, e]))
   const confidencePct = Math.round(cluster.confidence * 100)
+  // Live tool context per matching task — fetched on panel open. Most
+  // panels are never opened; we keep workflow-intelligence cache small
+  // by deferring this enrichment lookup to the moment the owner asks
+  // for detail.
+  const [enrichmentByPair, setEnrichmentByPair] = useState<EnrichmentByPair>({})
+  const [enrichmentsLoading, setEnrichmentsLoading] = useState(true)
+
+  useEffect(() => {
+    let cancelled = false
+    async function loadEnrichments() {
+      const since = new Date(Date.now() - 14 * 24 * 60 * 60 * 1000).toISOString()
+      // Pull the most recent enriched capture per (employee_id, task) pair
+      // in the cluster. One query per pair (bounded ~6 per cluster); fast
+      // because the partial index on (business_id, captured_at desc) WHERE
+      // capture_enrichments IS NULL only excludes nulls — the reverse query
+      // (NOT NULL) still scans the same hot index, just inverts the filter.
+      const results = await Promise.all(
+        cluster.matching_tasks.map(async (mt) => {
+          const { data } = await supabase
+            .from('captures')
+            .select('capture_enrichments, captured_at')
+            .eq('employee_id', mt.employee_id)
+            .eq('task', mt.task)
+            .gte('captured_at', since)
+            .not('capture_enrichments', 'is', null)
+            .order('captured_at', { ascending: false })
+            .limit(1)
+            .maybeSingle()
+          return {
+            key: `${mt.employee_id}::${mt.task}`,
+            enrichments:
+              (data?.capture_enrichments as CaptureEnrichments | null) ?? null,
+          }
+        })
+      )
+      if (cancelled) return
+      const next: EnrichmentByPair = {}
+      for (const r of results) next[r.key] = r.enrichments
+      setEnrichmentByPair(next)
+      setEnrichmentsLoading(false)
+    }
+    void loadEnrichments()
+    return () => {
+      cancelled = true
+    }
+  }, [cluster.id, cluster.matching_tasks])
+
+  // Aggregate enrichments across all matching tasks for the "what we're
+  // seeing live" rollup at the top of the panel.
+  const aggregatedEnrichments = (() => {
+    const merged: CaptureEnrichments = {}
+    for (const enrich of Object.values(enrichmentByPair)) {
+      if (!enrich) continue
+      for (const [k, v] of Object.entries(enrich)) {
+        if (!merged[k]) merged[k] = v
+      }
+    }
+    return Object.keys(merged).length > 0 ? merged : null
+  })()
 
   return (
     <>
@@ -145,6 +209,30 @@ export function WorkflowClusterPanel({
             </div>
           </div>
         </div>
+
+        {/* Live tool context — rendered above matching tasks when any of
+            the matching captures had OAuth-enriched data (Slack channel
+            messages, calendar events around capture time, unread email
+            samples). Helps the owner see the actual workflow, not just
+            the screen-text classification. */}
+        {(aggregatedEnrichments || enrichmentsLoading) && (
+          <div className="px-5 py-4 border-b border-gray-800">
+            <div className="flex items-center gap-2 mb-2.5">
+              <Sparkles className="w-3 h-3 text-emerald-300" />
+              <p className="text-[10px] uppercase tracking-wider text-gray-500 font-medium">
+                Live context from connected tools
+              </p>
+            </div>
+            {enrichmentsLoading ? (
+              <p className="text-[11px] text-gray-500">Loading...</p>
+            ) : aggregatedEnrichments ? (
+              <CaptureEnrichmentSummary
+                enrichments={aggregatedEnrichments}
+                variant="panel"
+              />
+            ) : null}
+          </div>
+        )}
 
         {/* Matching tasks per employee */}
         <div className="px-5 py-4 border-b border-gray-800">

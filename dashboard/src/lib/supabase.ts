@@ -56,6 +56,19 @@ export type Employee = {
   agent_version_updated_at?: string | null
 }
 
+export type CaptureCapabilityTag = {
+  id: string
+  params?: Record<string, unknown>
+  confidence?: number
+}
+
+export type CaptureEnrichments = {
+  slack?: Record<string, unknown>
+  'microsoft-365'?: Record<string, unknown>
+  'google-workspace'?: Record<string, unknown>
+  [tool: string]: Record<string, unknown> | undefined
+}
+
 export type Capture = {
   id: string
   employee_id: string
@@ -76,6 +89,8 @@ export type Capture = {
   keystrokes: number
   idle_seconds: number
   is_idle: boolean
+  capabilities?: CaptureCapabilityTag[] | null
+  capture_enrichments?: CaptureEnrichments | null
 }
 
 export type Report = {
