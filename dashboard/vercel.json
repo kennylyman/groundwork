@@ -11,11 +11,11 @@
     },
     {
       "path": "/api/integrations/refresh-tokens",
-      "schedule": "15 * * * *"
+      "schedule": "30 3 * * *"
     },
     {
       "path": "/api/integrations/enrich-captures",
-      "schedule": "*/5 * * * *"
+      "schedule": "0 4 * * *"
     }
   ]
 }
