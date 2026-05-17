@@ -36,6 +36,7 @@ def _build_payload(snapshot: dict, classification: dict, session_id: str, config
         "trigger": classification.get("trigger"),
         "reasoning": classification.get("reasoning"),
         "flags": classification.get("flags", []),
+        "capabilities": classification.get("capabilities", []),
         "active_window": snapshot.get("active_window"),
         "active_url": snapshot.get("active_url"),
         "keystrokes": snapshot.get("keystrokes_last_90s", 0),
