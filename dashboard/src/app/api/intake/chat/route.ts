@@ -285,10 +285,13 @@ The owner's transcript follows.`
     // a forcing nudge — the system prompt also has the hard rule, but the
     // retry is belt-and-suspenders.
 
-    async function callModel(messages: typeof apiMessages) {
+    async function callModel(
+      messages: typeof apiMessages,
+      forceTool?: 'ask_clarifying_question'
+    ) {
       return client.messages.create({
         model: MODEL,
-        max_tokens: 800,
+        max_tokens: 1200,
         system: [
           {
             type: 'text',
@@ -297,6 +300,12 @@ The owner's transcript follows.`
           },
         ],
         tools: INTAKE_TOOLS,
+        // First call: model picks freely (auto). Retry: FORCE the question
+        // so the conversation can't stall — Anthropic guarantees the named
+        // tool is called when tool_choice names it.
+        tool_choice: forceTool
+          ? { type: 'tool', name: forceTool }
+          : { type: 'auto' },
         messages,
       })
     }
@@ -310,10 +319,15 @@ The owner's transcript follows.`
     let completionSummary = firstParsed.completionSummary
     let retried = false
 
-    // RETRY when neither terminal tool fired. The model gave us field updates
-    // but no next question — without intervention the UI shows a fallback
-    // apology. Apply updates, rebuild the profile prefix with the fresh
-    // state, append a forcing reminder, retry once.
+    // RETRY with FORCED ask_clarifying_question when neither terminal tool
+    // fired on the first call. We pick the question side of the fork
+    // (rather than complete) because:
+    //   1. Bad-case: model wanted to keep extracting but skipped the ask.
+    //      Forcing a question continues the conversation.
+    //   2. Owner-said-skip case: extremely rare to hit this path —
+    //      "skip" would have been in the transcript and the first call
+    //      would have called signal_intake_complete. We'd rather one
+    //      extra-question UX than a stalled chat.
     if (!assistantMessage && !isComplete) {
       retried = true
       const partialProfile = applyUpdates(profile, collectedUpdates)
@@ -322,7 +336,7 @@ The owner's transcript follows.`
 ${nudgedSummary}
 </current_profile_state>
 
-The owner's transcript follows. [SYSTEM NOTE: your previous reply was missing a terminal tool call. Apply any remaining field updates, then call ask_clarifying_question or signal_intake_complete. The conversation can't progress without one of those.]`
+The owner's transcript follows. [SYSTEM NOTE: your previous reply was missing the next question. Ask the next question now — the conversation can't progress without one.]`
 
       const retryMessages: typeof apiMessages =
         recent.length === 0
@@ -330,7 +344,7 @@ The owner's transcript follows. [SYSTEM NOTE: your previous reply was missing a 
           : [{ role: 'user', content: nudgedPrefix }, ...recent]
 
       try {
-        const retryResponse = await callModel(retryMessages)
+        const retryResponse = await callModel(retryMessages, 'ask_clarifying_question')
         const retryParsed = parseAssistantResponse(retryResponse.content)
         // Merge updates from both calls; prefer the retry's terminal tool.
         collectedUpdates = [...collectedUpdates, ...retryParsed.updates]
