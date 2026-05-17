@@ -137,6 +137,28 @@ export const TOOL_REGISTRY: ToolDefinition[] = [
     ring2Available: true,
     ring3Available: true,
   },
+  // Google Workspace — same pattern as Microsoft 365. One OAuth covers
+  // Gmail, Calendar, Drive (and Docs/Sheets/Slides through Drive). Detect
+  // patterns stay empty so per-product detection (gmail, google-drive,
+  // google-calendar) still works in normalizeToolName; the adapter's
+  // matchesCapture() unifies across all Google surfaces.
+  {
+    id: 'google-workspace',
+    label: 'Google Workspace',
+    category: 'productivity',
+    capabilities: [
+      'communication.send.email',
+      'communication.triage.inbox',
+      'meeting.attend',
+      'meeting.followup',
+      'workflow.schedule',
+      'document.create',
+      'document.review',
+    ],
+    detect: { windowSubstrings: [], urlSubstrings: [] },
+    ring2Available: true,
+    ring3Available: true,
+  },
   {
     id: 'slack',
     label: 'Slack',
