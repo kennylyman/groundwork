@@ -65,9 +65,21 @@ export async function POST(request: NextRequest) {
     if (!biz) return NextResponse.json({ error: 'No business' }, { status: 404 })
 
     if (action === 'disconnect') {
+      // For ring 3 (native OAuth) we also blank out the stored tokens.
+      // callTool gates on access_token_encrypted being non-null, so this
+      // is what actually stops the tool from being callable. Leaving the
+      // row in place preserves event history and lets a future re-OAuth
+      // upsert into the same row.
+      const patch: Record<string, unknown> = { status: 'disconnected' }
+      if (ring === 3) {
+        patch.access_token_encrypted = null
+        patch.refresh_token_encrypted = null
+        patch.token_expires_at = null
+        patch.token_scopes = null
+      }
       const { error } = await supabase
         .from('integrations')
-        .update({ status: 'disconnected' })
+        .update(patch)
         .eq('business_id', biz.id)
         .eq('tool_name', toolName)
         .eq('ring', ring)

@@ -16,6 +16,7 @@ import { NextRequest, NextResponse } from 'next/server'
 import { createServerClient } from '@supabase/ssr'
 import { serverSupabase } from '@/lib/supabase'
 import { normalizeToolName, TOOL_BY_ID } from '@/lib/integrations'
+import { nativeToolNames } from '@/lib/integrations/adapters'
 
 const SEVEN_DAYS_MS = 7 * 24 * 60 * 60 * 1000
 
@@ -52,7 +53,9 @@ export async function GET(request: NextRequest) {
     const [intRes, capRes, profileRes] = await Promise.all([
       supabase
         .from('integrations')
-        .select('id, tool_name, ring, status, connected_at, last_event_at, event_count, config')
+        .select(
+          'id, tool_name, ring, status, connected_at, last_event_at, event_count, config, external_account_label, token_expires_at'
+        )
         .eq('business_id', biz.id),
       supabase
         .from('captures')
@@ -104,6 +107,7 @@ export async function GET(request: NextRequest) {
       integrations,
       detected_tools: detectedTools,
       intake_tools: intakeTools,
+      native_tools: nativeToolNames(),
     })
   } catch (err) {
     const message = err instanceof Error ? err.message : 'unknown'

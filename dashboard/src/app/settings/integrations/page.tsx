@@ -1,6 +1,7 @@
 'use client'
 
-import { useEffect, useState } from 'react'
+import { Suspense, useEffect, useState } from 'react'
+import { useSearchParams, useRouter } from 'next/navigation'
 import {
   Plug,
   CheckCircle2,
@@ -12,6 +13,7 @@ import {
   AlertCircle,
   ChevronDown,
   ChevronUp,
+  Sparkles,
 } from 'lucide-react'
 import { TOOL_BY_ID, TOOL_REGISTRY } from '@/lib/integrations'
 
@@ -26,6 +28,8 @@ type IntegrationRow = {
   last_event_at: string | null
   event_count: number
   config: Record<string, unknown>
+  external_account_label: string | null
+  token_expires_at: string | null
 }
 
 type DetectedTool = {
@@ -47,6 +51,7 @@ type StateResponse = {
   integrations: IntegrationRow[]
   detected_tools: DetectedTool[]
   intake_tools: IntakeTool[]
+  native_tools: string[]
 }
 
 type ToolEntry = {
@@ -63,17 +68,58 @@ type ToolEntry = {
   capabilities: string[]
   ring2Available: boolean
   ring3Available: boolean
+  native: boolean
 }
 
 export default function IntegrationsSettingsPage() {
+  // useSearchParams forces dynamic rendering at the boundary; wrap the
+  // OAuth-callback-aware inner component in Suspense so the rest of the
+  // settings shell can prerender.
+  return (
+    <Suspense fallback={<IntegrationsLoading />}>
+      <IntegrationsSettingsInner />
+    </Suspense>
+  )
+}
+
+function IntegrationsLoading() {
+  return (
+    <div className="px-6 py-12 text-center">
+      <Loader2 className="w-5 h-5 animate-spin text-gray-400 mx-auto" />
+    </div>
+  )
+}
+
+function IntegrationsSettingsInner() {
+  const router = useRouter()
+  const searchParams = useSearchParams()
   const [state, setState] = useState<StateResponse | null>(null)
   const [secret, setSecret] = useState<{ secret: string; webhook_url: string } | null>(null)
   const [loadingState, setLoadingState] = useState(true)
   const [loadingSecret, setLoadingSecret] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  const [flash, setFlash] = useState<string | null>(null)
   const [expandedTool, setExpandedTool] = useState<string | null>(null)
   const [copied, setCopied] = useState<string | null>(null)
   const [busy, setBusy] = useState<string | null>(null)
+  const [showZapierFallback, setShowZapierFallback] = useState(false)
+
+  // Surface OAuth callback redirects (?connected=slack&account=Acme or ?error=...)
+  useEffect(() => {
+    const connected = searchParams.get('connected')
+    const account = searchParams.get('account')
+    const err = searchParams.get('error')
+    if (connected) {
+      const label = TOOL_BY_ID[connected]?.label || connected
+      setFlash(
+        `${label} connected${account ? ` — workspace: ${account}` : ''}`
+      )
+      router.replace('/settings/integrations')
+    } else if (err) {
+      setError(err)
+      router.replace('/settings/integrations')
+    }
+  }, [searchParams, router])
 
   useEffect(() => {
     void loadState()
@@ -83,7 +129,7 @@ export default function IntegrationsSettingsPage() {
     setLoadingState(true)
     setError(null)
     try {
-      const r = await fetch('/api/integrations/state')
+      const r = await fetch('/api/integrations/state', { cache: 'no-store' })
       const body = await r.json()
       if (!r.ok) throw new Error(body.error || `HTTP ${r.status}`)
       setState(body)
@@ -108,18 +154,45 @@ export default function IntegrationsSettingsPage() {
     }
   }
 
-  async function toggleConnect(
-    tool_id: string,
-    ring: Ring,
-    action: 'connect' | 'disconnect'
-  ) {
-    setBusy(`${tool_id}:${ring}:${action}`)
+  /** Native OAuth: full-page redirect to /api/integrations/oauth/<tool>.
+   *  Browser follows redirects to the provider, user authorizes, callback
+   *  brings them back here with ?connected= or ?error=. */
+  function connectNative(toolId: string) {
+    setBusy(`${toolId}:3:connect`)
+    window.location.href = `/api/integrations/oauth/${toolId}`
+  }
+
+  async function disconnectNative(toolId: string) {
+    setBusy(`${toolId}:3:disconnect`)
     setError(null)
     try {
       const r = await fetch('/api/integrations/connect', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ tool_name: tool_id, ring, action }),
+        body: JSON.stringify({ tool_name: toolId, ring: 3, action: 'disconnect' }),
+      })
+      const body = await r.json()
+      if (!r.ok) throw new Error(body.error || `HTTP ${r.status}`)
+      await loadState()
+      setFlash(`Disconnected ${TOOL_BY_ID[toolId]?.label || toolId}`)
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'unknown error')
+    } finally {
+      setBusy(null)
+    }
+  }
+
+  async function toggleZapierConnect(
+    tool_id: string,
+    action: 'connect' | 'disconnect'
+  ) {
+    setBusy(`${tool_id}:2:${action}`)
+    setError(null)
+    try {
+      const r = await fetch('/api/integrations/connect', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ tool_name: tool_id, ring: 2, action }),
       })
       const body = await r.json()
       if (!r.ok) throw new Error(body.error || `HTTP ${r.status}`)
@@ -142,6 +215,7 @@ export default function IntegrationsSettingsPage() {
   const tools: ToolEntry[] = (() => {
     if (!state) return []
     const seen = new Map<string, ToolEntry>()
+    const nativeSet = new Set(state.native_tools)
 
     function ensure(tool_id: string, tool_label: string): ToolEntry {
       const existing = seen.get(tool_id)
@@ -156,12 +230,18 @@ export default function IntegrationsSettingsPage() {
         rings: { 1: null, 2: null, 3: null },
         capabilities: def?.capabilities || [],
         ring2Available: def?.ring2Available ?? true,
-        ring3Available: def?.ring3Available ?? false,
+        ring3Available: nativeSet.has(tool_id),
+        native: nativeSet.has(tool_id),
       }
       seen.set(tool_id, fresh)
       return fresh
     }
 
+    // Always show every natively-supported tool so owners discover them
+    // even before the agent has captured anything.
+    for (const native of state.native_tools) {
+      ensure(native, TOOL_BY_ID[native]?.label || native)
+    }
     for (const d of state.detected_tools) {
       const t = ensure(d.tool_id, d.tool_label)
       t.capture_count_7d = d.capture_count_7d
@@ -177,99 +257,68 @@ export default function IntegrationsSettingsPage() {
     }
 
     return Array.from(seen.values()).sort((a, b) => {
-      // Connected first, then high-detection, then alpha
-      const connectedA =
-        a.rings[3]?.status === 'connected' || a.rings[2]?.status === 'connected'
-      const connectedB =
-        b.rings[3]?.status === 'connected' || b.rings[2]?.status === 'connected'
-      if (connectedA !== connectedB) return connectedA ? -1 : 1
+      // Connected (ring 3) first, then native (offering 1-click) next,
+      // then connected via Zapier, then by detection volume, then alpha.
+      const a3 = a.rings[3]?.status === 'connected'
+      const b3 = b.rings[3]?.status === 'connected'
+      if (a3 !== b3) return a3 ? -1 : 1
+      if (a.native !== b.native) return a.native ? -1 : 1
+      const a2 = a.rings[2]?.status === 'connected'
+      const b2 = b.rings[2]?.status === 'connected'
+      if (a2 !== b2) return a2 ? -1 : 1
       if (a.capture_count_7d !== b.capture_count_7d)
         return b.capture_count_7d - a.capture_count_7d
       return a.tool_label.localeCompare(b.tool_label)
     })
   })()
 
+  const nativeTools = tools.filter((t) => t.native)
+  const otherTools = tools.filter((t) => !t.native)
+
   return (
     <div className="space-y-6">
-      {/* Webhook config card */}
-      <div className="bg-white rounded-2xl border border-gray-200 p-6">
-        <div className="flex items-start justify-between gap-4 mb-4">
-          <div>
-            <div className="flex items-center gap-2 mb-1">
-              <div className="w-7 h-7 rounded-lg bg-amber-100 text-amber-700 flex items-center justify-center">
-                <Zap className="w-3.5 h-3.5" />
-              </div>
-              <h2 className="text-sm font-semibold text-gray-900">
-                Zapier webhook
-              </h2>
-            </div>
-            <p className="text-xs text-gray-500 leading-relaxed max-w-2xl">
-              One endpoint, all your tools. Set up a Zap that POSTs to the URL
-              below with the auth token in the <code className="px-1 py-0.5 bg-gray-100 rounded text-[10px]">X-Groundwork-Token</code> header.
-              Groundwork will mark the matching tool connected when the first
-              event lands.
-            </p>
-          </div>
-        </div>
-
-        {!secret ? (
+      {/* Flash banner — success or error from OAuth callback */}
+      {flash && (
+        <div className="flex items-center gap-2 px-4 py-3 bg-emerald-50 border border-emerald-100 rounded-xl text-sm text-emerald-800">
+          <CheckCircle2 className="w-4 h-4 shrink-0" />
+          <span className="flex-1">{flash}</span>
           <button
             type="button"
-            onClick={loadSecret}
-            disabled={loadingSecret}
-            className="flex items-center gap-1.5 px-3 py-2 text-xs font-medium text-white bg-gray-900 rounded-lg hover:bg-gray-700 disabled:opacity-50"
+            onClick={() => setFlash(null)}
+            className="text-emerald-700 hover:text-emerald-900 text-xs"
           >
-            {loadingSecret ? (
-              <>
-                <Loader2 className="w-3.5 h-3.5 animate-spin" />
-                Loading…
-              </>
-            ) : (
-              <>Reveal webhook URL + token</>
-            )}
+            Dismiss
           </button>
-        ) : (
-          <div className="space-y-3">
-            <SecretRow
-              label="Webhook URL"
-              value={secret.webhook_url}
-              onCopy={() => copyText('url', secret.webhook_url)}
-              copied={copied === 'url'}
-            />
-            <SecretRow
-              label="X-Groundwork-Token"
-              value={secret.secret}
-              onCopy={() => copyText('token', secret.secret)}
-              copied={copied === 'token'}
-              mono
-            />
-            <p className="text-[11px] text-gray-400 leading-relaxed">
-              Treat the token like a password. Anyone with it can post events to your dashboard.
-            </p>
-          </div>
-        )}
-      </div>
-
-      {/* Error surface */}
+        </div>
+      )}
       {error && (
-        <div className="flex items-start gap-2 px-3 py-2 bg-red-50 border border-red-100 rounded-lg">
-          <AlertCircle className="w-4 h-4 text-red-500 mt-0.5 shrink-0" />
-          <p className="text-xs text-red-700">{error}</p>
+        <div className="flex items-start gap-2 px-4 py-3 bg-red-50 border border-red-100 rounded-xl text-sm text-red-700">
+          <AlertCircle className="w-4 h-4 mt-0.5 shrink-0" />
+          <span className="flex-1 break-all">{error}</span>
+          <button
+            type="button"
+            onClick={() => setError(null)}
+            className="text-red-700 hover:text-red-900 text-xs shrink-0"
+          >
+            Dismiss
+          </button>
         </div>
       )}
 
-      {/* Tools list */}
+      {/* Native integrations — the primary path */}
       <div className="bg-white rounded-2xl border border-gray-200">
         <div className="px-6 py-4 border-b border-gray-100">
           <div className="flex items-center gap-2">
-            <div className="w-7 h-7 rounded-lg bg-blue-100 text-blue-700 flex items-center justify-center">
-              <Boxes className="w-3.5 h-3.5" />
+            <div className="w-7 h-7 rounded-lg bg-indigo-100 text-indigo-700 flex items-center justify-center">
+              <Sparkles className="w-3.5 h-3.5" />
             </div>
             <div>
-              <h2 className="text-sm font-semibold text-gray-900">Your tools</h2>
+              <h2 className="text-sm font-semibold text-gray-900">
+                One-click integrations
+              </h2>
               <p className="text-xs text-gray-500 mt-0.5">
-                Detected from captures, mentioned in intake, or actively
-                connected via a Zap.
+                Connect directly to your tools with a single OAuth. Real-time
+                capture enrichment unlocks once the link is in place.
               </p>
             </div>
           </div>
@@ -279,17 +328,56 @@ export default function IntegrationsSettingsPage() {
           <div className="px-6 py-12 text-center">
             <Loader2 className="w-5 h-5 animate-spin text-gray-400 mx-auto" />
           </div>
-        ) : tools.length === 0 ? (
-          <div className="px-6 py-12 text-center">
-            <p className="text-sm text-gray-500">No tools yet</p>
-            <p className="text-xs text-gray-400 mt-1">
-              Once your agent has collected captures, tools detected from window
-              titles + URLs will appear here.
-            </p>
+        ) : nativeTools.length === 0 ? (
+          <div className="px-6 py-10 text-center text-sm text-gray-500">
+            No native integrations available yet.
           </div>
         ) : (
           <div className="divide-y divide-gray-50">
-            {tools.map((tool) => (
+            {nativeTools.map((tool) => (
+              <NativeToolRow
+                key={tool.tool_id}
+                tool={tool}
+                busy={busy}
+                onConnect={() => connectNative(tool.tool_id)}
+                onDisconnect={() => disconnectNative(tool.tool_id)}
+              />
+            ))}
+          </div>
+        )}
+      </div>
+
+      {/* Other tools list — these can still be connected via Zapier */}
+      <div className="bg-white rounded-2xl border border-gray-200">
+        <div className="px-6 py-4 border-b border-gray-100">
+          <div className="flex items-center gap-2">
+            <div className="w-7 h-7 rounded-lg bg-gray-100 text-gray-700 flex items-center justify-center">
+              <Boxes className="w-3.5 h-3.5" />
+            </div>
+            <div>
+              <h2 className="text-sm font-semibold text-gray-900">
+                Other tools detected
+              </h2>
+              <p className="text-xs text-gray-500 mt-0.5">
+                Tools your team uses that we don&rsquo;t natively integrate with yet.
+                Connect them via Zapier (below) to surface event data.
+              </p>
+            </div>
+          </div>
+        </div>
+
+        {loadingState ? (
+          <div className="px-6 py-12 text-center">
+            <Loader2 className="w-5 h-5 animate-spin text-gray-400 mx-auto" />
+          </div>
+        ) : otherTools.length === 0 ? (
+          <div className="px-6 py-10 text-center text-sm text-gray-500">
+            No other tools detected yet. Once your team uses tools on a
+            Groundwork-instrumented machine, they&rsquo;ll appear here.
+          </div>
+        ) : (
+          <div className="divide-y divide-gray-50">
+            {otherTools.map((tool) => (
               <ToolRow
                 key={tool.tool_id}
                 tool={tool}
@@ -297,8 +385,12 @@ export default function IntegrationsSettingsPage() {
                 onToggle={() =>
                   setExpandedTool(expandedTool === tool.tool_id ? null : tool.tool_id)
                 }
-                onConnect={(ring) => toggleConnect(tool.tool_id, ring, 'connect')}
-                onDisconnect={(ring) => toggleConnect(tool.tool_id, ring, 'disconnect')}
+                onConnect={(ring) =>
+                  ring === 2 ? toggleZapierConnect(tool.tool_id, 'connect') : undefined
+                }
+                onDisconnect={(ring) =>
+                  ring === 2 ? toggleZapierConnect(tool.tool_id, 'disconnect') : undefined
+                }
                 busyKey={busy}
               />
             ))}
@@ -306,12 +398,185 @@ export default function IntegrationsSettingsPage() {
         )}
       </div>
 
-      {/* Catalog hint */}
+      {/* Zapier webhook — now a collapsible "advanced" section */}
+      <div className="bg-white rounded-2xl border border-gray-200">
+        <button
+          type="button"
+          onClick={() => setShowZapierFallback((v) => !v)}
+          className="w-full px-6 py-4 flex items-center justify-between gap-3 text-left"
+        >
+          <div className="flex items-center gap-2">
+            <div className="w-7 h-7 rounded-lg bg-amber-100 text-amber-700 flex items-center justify-center">
+              <Zap className="w-3.5 h-3.5" />
+            </div>
+            <div>
+              <h2 className="text-sm font-semibold text-gray-900">
+                Connect other tools via Zapier
+              </h2>
+              <p className="text-xs text-gray-500 mt-0.5">
+                For tools we don&rsquo;t natively integrate with — point a Zap at our
+                webhook. Requires a Zapier account.
+              </p>
+            </div>
+          </div>
+          {showZapierFallback ? (
+            <ChevronUp className="w-4 h-4 text-gray-400" />
+          ) : (
+            <ChevronDown className="w-4 h-4 text-gray-400" />
+          )}
+        </button>
+
+        {showZapierFallback && (
+          <div className="px-6 pb-5 border-t border-gray-50 pt-4">
+            {!secret ? (
+              <button
+                type="button"
+                onClick={loadSecret}
+                disabled={loadingSecret}
+                className="flex items-center gap-1.5 px-3 py-2 text-xs font-medium text-white bg-gray-900 rounded-lg hover:bg-gray-700 disabled:opacity-50"
+              >
+                {loadingSecret ? (
+                  <>
+                    <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                    Loading…
+                  </>
+                ) : (
+                  <>Reveal webhook URL + token</>
+                )}
+              </button>
+            ) : (
+              <div className="space-y-3">
+                <p className="text-xs text-gray-600 leading-relaxed">
+                  Configure your Zap with these. The action is &ldquo;Webhooks by Zapier
+                  → POST&rdquo; with the URL below and the
+                  {' '}<code className="px-1 py-0.5 bg-gray-100 rounded text-[10px]">X-Groundwork-Token</code> header
+                  set to the token.
+                </p>
+                <SecretRow
+                  label="Webhook URL"
+                  value={secret.webhook_url}
+                  onCopy={() => copyText('url', secret.webhook_url)}
+                  copied={copied === 'url'}
+                />
+                <SecretRow
+                  label="X-Groundwork-Token"
+                  value={secret.secret}
+                  onCopy={() => copyText('token', secret.secret)}
+                  copied={copied === 'token'}
+                  mono
+                />
+                <p className="text-[11px] text-gray-400 leading-relaxed">
+                  Treat the token like a password. Anyone with it can post events to
+                  your dashboard.
+                </p>
+              </div>
+            )}
+          </div>
+        )}
+      </div>
+
       <p className="text-[11px] text-gray-400 text-center">
-        Don&rsquo;t see a tool? Once your team uses it on a Groundwork-instrumented
-        machine, it&rsquo;ll show up here automatically. {TOOL_REGISTRY.length} tools
-        recognized today; new ones land continuously.
+        {TOOL_REGISTRY.length} tools recognized today; native integrations land continuously.
       </p>
+    </div>
+  )
+}
+
+// ---------- Native tool row ----------
+
+function NativeToolRow({
+  tool,
+  busy,
+  onConnect,
+  onDisconnect,
+}: {
+  tool: ToolEntry
+  busy: string | null
+  onConnect: () => void
+  onDisconnect: () => void
+}) {
+  const ring3 = tool.rings[3]
+  const connected = ring3?.status === 'connected'
+  const errored = ring3?.status === 'error'
+  const connectKey = `${tool.tool_id}:3:connect`
+  const disconnectKey = `${tool.tool_id}:3:disconnect`
+  const busyConnect = busy === connectKey
+  const busyDisconnect = busy === disconnectKey
+
+  return (
+    <div className="px-6 py-4 flex items-center justify-between gap-4">
+      <div className="flex items-center gap-3 min-w-0">
+        <div className="shrink-0 w-9 h-9 rounded-lg bg-indigo-100 text-indigo-700 flex items-center justify-center text-sm font-semibold">
+          {tool.tool_label[0]}
+        </div>
+        <div className="min-w-0">
+          <div className="flex items-center gap-2 flex-wrap">
+            <p className="text-sm font-medium text-gray-900 truncate">
+              {tool.tool_label}
+            </p>
+            {connected && (
+              <span className="text-[10px] px-1.5 py-0.5 rounded bg-emerald-50 text-emerald-700 border border-emerald-200 font-semibold uppercase tracking-wider inline-flex items-center gap-1">
+                <CheckCircle2 className="w-2.5 h-2.5" />
+                Connected
+              </span>
+            )}
+            {errored && (
+              <span className="text-[10px] px-1.5 py-0.5 rounded bg-red-50 text-red-700 border border-red-200 font-semibold uppercase tracking-wider">
+                Re-auth needed
+              </span>
+            )}
+            {tool.capture_count_7d > 0 && (
+              <span className="text-[10px] px-1.5 py-0.5 rounded bg-gray-50 text-gray-600 border border-gray-200 font-medium">
+                {tool.capture_count_7d}× this week
+              </span>
+            )}
+          </div>
+          <p className="text-xs text-gray-500 mt-0.5">
+            {connected && ring3?.external_account_label ? (
+              <>Workspace: {ring3.external_account_label}</>
+            ) : connected ? (
+              <>Connected via OAuth</>
+            ) : (
+              <>One-click native integration</>
+            )}
+          </p>
+        </div>
+      </div>
+
+      <div className="shrink-0 flex items-center gap-2">
+        {connected ? (
+          <button
+            type="button"
+            onClick={onDisconnect}
+            disabled={busyDisconnect}
+            className="px-3 py-1.5 text-xs font-medium text-gray-600 border border-gray-200 rounded-lg hover:bg-gray-50 disabled:opacity-50"
+          >
+            {busyDisconnect ? 'Disconnecting…' : 'Disconnect'}
+          </button>
+        ) : (
+          <button
+            type="button"
+            onClick={onConnect}
+            disabled={busyConnect}
+            className={`px-3 py-1.5 text-xs font-medium rounded-lg disabled:opacity-50 ${
+              errored
+                ? 'text-white bg-red-600 hover:bg-red-700'
+                : 'text-white bg-gray-900 hover:bg-gray-700'
+            }`}
+          >
+            {busyConnect ? (
+              <span className="inline-flex items-center gap-1.5">
+                <Loader2 className="w-3 h-3 animate-spin" />
+                Redirecting…
+              </span>
+            ) : errored ? (
+              'Re-connect'
+            ) : (
+              `Connect ${tool.tool_label}`
+            )}
+          </button>
+        )}
+      </div>
     </div>
   )
 }
@@ -372,12 +637,10 @@ function ToolRow({
 }) {
   const ring1 = tool.rings[1]
   const ring2 = tool.rings[2]
-  const ring3 = tool.rings[3]
 
   // Ring 1 is auto-on when there are recent detections.
   const ring1Connected = tool.capture_count_7d > 0 || ring1?.status === 'connected'
   const ring2Connected = ring2?.status === 'connected'
-  const ring3Connected = ring3?.status === 'connected'
 
   return (
     <div className="px-6 py-4">
@@ -422,9 +685,6 @@ function ToolRow({
               label="Zapier"
             />
           )}
-          {tool.ring3Available && (
-            <RingPill ring={3} active={ring3Connected} label="Native" />
-          )}
           {expanded ? (
             <ChevronUp className="w-4 h-4 text-gray-400 ml-1" />
           ) : (
@@ -450,7 +710,7 @@ function ToolRow({
               ring={2}
               label="Zapier bridge"
               icon={Zap}
-              description="Connect via Zapier to ship event data to Groundwork. Enables automation triggers and event correlation with captures."
+              description="Connect via Zapier to ship event data to Groundwork. Configure a Zap with the webhook URL + token from the section below, then mark connected here."
               row={ring2}
               connected={ring2Connected}
               actions={
@@ -470,30 +730,11 @@ function ToolRow({
                     disabled={busyKey === `${tool.tool_id}:2:connect`}
                     className="px-3 py-1.5 text-xs font-medium text-white bg-gray-900 rounded-lg hover:bg-gray-700 disabled:opacity-50"
                   >
-                    {busyKey === `${tool.tool_id}:2:connect` ? 'Connecting…' : 'Mark as connected'}
+                    {busyKey === `${tool.tool_id}:2:connect`
+                      ? 'Marking…'
+                      : "I've set up the Zap"}
                   </button>
                 )
-              }
-            />
-          )}
-
-          {tool.ring3Available && (
-            <RingDetail
-              ring={3}
-              label="Native integration"
-              icon={Plug}
-              description="Direct OAuth integration for deepest data access. Coming soon."
-              row={ring3}
-              connected={ring3Connected}
-              actions={
-                <button
-                  type="button"
-                  disabled
-                  className="px-3 py-1.5 text-xs font-medium text-gray-400 bg-gray-50 rounded-lg cursor-not-allowed"
-                  title="Coming soon"
-                >
-                  Coming soon
-                </button>
               }
             />
           )}

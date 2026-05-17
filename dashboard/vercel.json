@@ -8,6 +8,14 @@
     {
       "path": "/api/discover-roles",
       "schedule": "0 2 * * *"
+    },
+    {
+      "path": "/api/integrations/refresh-tokens",
+      "schedule": "15 * * * *"
+    },
+    {
+      "path": "/api/integrations/enrich-captures",
+      "schedule": "*/5 * * * *"
     }
   ]
 }
