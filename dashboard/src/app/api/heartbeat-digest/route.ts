@@ -94,10 +94,14 @@ async function handle(req: NextRequest) {
 
   const silentByBusiness = new Map<string, EmployeeRow[]>()
   for (const emp of (employees ?? []) as EmployeeRow[]) {
+    // Skip employees whose agent has never checked in. They haven't
+    // installed yet — they're "pending first install", not "silent".
+    // Without this skip, the digest would email the owner the morning
+    // after they invite a batch of employees, telling them every fresh
+    // invite is silent. That's exactly the wrong moment to spam an owner.
+    if (!emp.agent_version_updated_at) continue
     const hasRecentCapture = recentCaptureIds.has(emp.id)
-    const heartbeatRecent =
-      emp.agent_version_updated_at &&
-      emp.agent_version_updated_at >= cutoff
+    const heartbeatRecent = emp.agent_version_updated_at >= cutoff
     if (hasRecentCapture || heartbeatRecent) continue
     const list = silentByBusiness.get(emp.business_id) ?? []
     list.push(emp)
