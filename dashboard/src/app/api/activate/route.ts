@@ -42,11 +42,23 @@ export async function GET(request: NextRequest) {
     )
   }
 
+  // Pull the business profile so the agent can prime classify.py with
+  // business context. Missing profile is fine — classify.py knows how to
+  // handle empty business_context.
+  const { data: profile } = await supabase
+    .from('business_profiles')
+    .select(
+      'industry, sub_industry, size_band, operations_vocab, tool_stack, workflows, pain_points, roles, compliance_constraints'
+    )
+    .eq('business_id', employee.business_id)
+    .maybeSingle()
+
   return NextResponse.json({
     employee_id: employee.id,
     business_id: employee.business_id,
     anthropic_api_key: anthropicKey,
     supabase_url: supabaseUrl,
     supabase_anon_key: supabaseAnonKey,
+    business_context: profile ?? null,
   })
 }

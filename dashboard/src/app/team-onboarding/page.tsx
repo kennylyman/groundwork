@@ -12,9 +12,8 @@ import {
   Activity,
   CheckCircle,
   Clock,
-  Building2,
-  ArrowRight,
 } from 'lucide-react'
+import { IntakeChat } from '@/components/IntakeChat'
 
 // ---------- Types ----------
 
@@ -43,19 +42,6 @@ const ROLES = [
   'Care Coordinator',
   'Admin Assistant',
   'Operations Manager',
-  'Other',
-]
-
-const INDUSTRIES = [
-  'Home Care',
-  'Healthcare',
-  'Legal',
-  'Accounting',
-  'Real Estate',
-  'Insurance',
-  'Construction',
-  'Retail',
-  'Restaurant',
   'Other',
 ]
 
@@ -106,9 +92,29 @@ export default function TeamOnboardingPage() {
     <div className="min-h-screen bg-gray-50">
       <Header showDashboardLink={!!business} onGoToDashboard={() => router.push('/')} />
 
-      <div className="max-w-3xl mx-auto px-8 py-12">
+      <div className={`mx-auto px-8 py-12 ${business ? 'max-w-3xl' : 'max-w-6xl'}`}>
         {!business && user && (
-          <CreateBusinessView user={user} onCreated={(b) => setBusiness(b)} />
+          <>
+            <div className="mb-8">
+              <h1 className="text-2xl font-semibold text-gray-900">
+                Let&rsquo;s set up your business
+              </h1>
+              <p className="text-sm text-gray-500 mt-1">
+                Signed in as <span className="font-medium text-gray-700">{user.email}</span>.
+                Chat with the onboarding agent below — it&rsquo;ll fill in your
+                profile as you go.
+              </p>
+            </div>
+            <IntakeChat
+              initialOwnerName={(user.user_metadata?.full_name as string) || undefined}
+              ownerEmail={user.email}
+              onCompleted={() => {
+                // The complete endpoint already created the business row;
+                // re-fetch so the page transitions to the TeamView.
+                void loadData()
+              }}
+            />
+          </>
         )}
         {business && <TeamView business={business} />}
       </div>
@@ -142,193 +148,6 @@ function Header({
         )}
       </div>
     </div>
-  )
-}
-
-// ---------- Create-business view (no business yet) ----------
-
-function CreateBusinessView({
-  user,
-  onCreated,
-}: {
-  user: User
-  onCreated: (b: Business) => void
-}) {
-  const [form, setForm] = useState({
-    businessName: '',
-    industry: '',
-    ownerName: (user.user_metadata?.full_name as string) || '',
-  })
-  const [creating, setCreating] = useState(false)
-  const [error, setError] = useState('')
-
-  async function createBusiness(e: React.FormEvent) {
-    e.preventDefault()
-    if (!form.businessName || !form.industry || !form.ownerName) return
-    setCreating(true)
-    setError('')
-
-    try {
-      const { data: business, error: bizErr } = await supabase
-        .from('businesses')
-        .insert({
-          name: form.businessName,
-          industry: form.industry,
-          owner_id: user.id,
-        })
-        .select()
-        .single()
-
-      if (bizErr) throw bizErr
-      if (!business) throw new Error('Business creation returned no row')
-
-      // Create the owner as the first employee — mirrors the signup flow so
-      // the team management view (and the dashboard) immediately has a row
-      // to anchor everything else to.
-      const { error: empErr } = await supabase.from('employees').insert({
-        business_id: business.id,
-        name: form.ownerName,
-        role: 'Owner',
-        email: user.email,
-        is_active: true,
-        install_token: crypto.randomUUID(),
-      })
-
-      // Non-fatal — business exists either way, owner can re-add themselves
-      // from the team view if this errored.
-      if (empErr) console.error('Failed to add owner as first employee:', empErr)
-
-      onCreated(business as Business)
-    } catch (err) {
-      const message = err instanceof Error ? err.message : 'Failed to create business'
-      setError(message)
-    } finally {
-      setCreating(false)
-    }
-  }
-
-  return (
-    <>
-      <div className="mb-10">
-        <h1 className="text-2xl font-semibold text-gray-900">
-          Let&rsquo;s set up your business
-        </h1>
-        <p className="text-sm text-gray-500 mt-1">
-          Signed in as <span className="font-medium text-gray-700">{user.email}</span>.
-          Tell us a little about your company and we&rsquo;ll spin up your dashboard.
-        </p>
-      </div>
-
-      <div className="bg-gray-900 rounded-2xl p-6 mb-8 text-white">
-        <h2 className="text-sm font-semibold mb-4">How it works</h2>
-        <div className="grid grid-cols-3 gap-4">
-          {[
-            { step: '1', title: 'Create your business', desc: 'Name, industry, your role' },
-            { step: '2', title: 'Add your team', desc: 'Each person gets an installer link' },
-            { step: '3', title: 'Insights flow in', desc: 'Real-time workflow intelligence' },
-          ].map((s) => (
-            <div key={s.step} className="flex gap-3">
-              <div className="w-5 h-5 rounded-full bg-white/20 flex items-center justify-center text-xs font-medium shrink-0 mt-0.5">
-                {s.step}
-              </div>
-              <div>
-                <p className="text-xs font-medium">{s.title}</p>
-                <p className="text-xs text-white/60 mt-0.5">{s.desc}</p>
-              </div>
-            </div>
-          ))}
-        </div>
-      </div>
-
-      <form
-        onSubmit={createBusiness}
-        className="bg-white rounded-2xl border border-gray-200 p-6"
-      >
-        <div className="flex items-center gap-2 mb-5">
-          <Building2 className="w-4 h-4 text-gray-500" />
-          <h2 className="text-sm font-semibold text-gray-900">Business details</h2>
-        </div>
-
-        <div className="space-y-4">
-          <div>
-            <label className="block text-xs font-medium text-gray-700 mb-1">
-              Business name
-            </label>
-            <input
-              type="text"
-              required
-              autoFocus
-              value={form.businessName}
-              onChange={(e) => setForm((f) => ({ ...f, businessName: e.target.value }))}
-              className="w-full px-3 py-2 text-sm border border-gray-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-gray-900 focus:border-transparent"
-              placeholder="Acme Home Care"
-            />
-          </div>
-
-          <div className="grid grid-cols-2 gap-3">
-            <div>
-              <label className="block text-xs font-medium text-gray-700 mb-1">
-                Industry
-              </label>
-              <select
-                required
-                value={form.industry}
-                onChange={(e) => setForm((f) => ({ ...f, industry: e.target.value }))}
-                className="w-full px-3 py-2 text-sm border border-gray-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-gray-900 bg-white"
-              >
-                <option value="">Select industry</option>
-                {INDUSTRIES.map((i) => (
-                  <option key={i} value={i}>
-                    {i}
-                  </option>
-                ))}
-              </select>
-            </div>
-
-            <div>
-              <label className="block text-xs font-medium text-gray-700 mb-1">
-                Your name
-              </label>
-              <input
-                type="text"
-                required
-                value={form.ownerName}
-                onChange={(e) => setForm((f) => ({ ...f, ownerName: e.target.value }))}
-                className="w-full px-3 py-2 text-sm border border-gray-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-gray-900 focus:border-transparent"
-                placeholder="Jane Smith"
-              />
-            </div>
-          </div>
-
-          {error && (
-            <div className="text-xs text-red-600 bg-red-50 border border-red-100 rounded-lg px-3 py-2">
-              {error}
-            </div>
-          )}
-
-          <button
-            type="submit"
-            disabled={
-              creating || !form.businessName || !form.industry || !form.ownerName
-            }
-            className="w-full flex items-center justify-center gap-2 bg-gray-900 text-white text-sm font-medium py-2.5 rounded-lg hover:bg-gray-700 transition-colors disabled:opacity-50"
-          >
-            {creating ? (
-              <>Creating your business…</>
-            ) : (
-              <>
-                Create business
-                <ArrowRight className="w-4 h-4" />
-              </>
-            )}
-          </button>
-
-          <p className="text-[11px] text-gray-400 text-center pt-1">
-            You can rename or change industry later from settings.
-          </p>
-        </div>
-      </form>
-    </>
   )
 }
 

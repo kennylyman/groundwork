@@ -134,15 +134,23 @@ Return the same JSON shape.
 
 
 def _format_business_context(ctx: dict | None) -> str:
-    """Render business context (from Phase 2 onboarding agent) into the prompt.
-
-    Phase 1 ships with this empty — placeholder is fine and tells the model
-    to fall back on general SMB priors.
+    """Render business context (from the Phase 2 onboarding agent) into the
+    prompt. Keys here match the business_profiles table columns the
+    /api/activate endpoint returns.
     """
     if not ctx:
         return "  (Business context not yet captured. Use general SMB priors.)"
     parts = []
-    for k in ("industry", "sub_industry", "size_band", "tool_stack", "vocab", "pain_points"):
+    for k in (
+        "industry",
+        "sub_industry",
+        "size_band",
+        "operations_vocab",
+        "tool_stack",
+        "workflows",
+        "pain_points",
+        "compliance_constraints",
+    ):
         v = ctx.get(k)
         if v:
             parts.append(f"  {k}: {v if isinstance(v, str) else json.dumps(v)}")

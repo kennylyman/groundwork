@@ -366,7 +366,12 @@ def run_capture_loop(config: dict) -> None:
                 snapshot = build_context_snapshot(previous_tasks=recent_tasks[-5:])
                 log(f"Snapshot taken: {snapshot.get('active_window')}")
 
-                classification = classify_snapshot(snapshot, config['anthropic_api_key'])
+                classification = classify_snapshot(
+                    snapshot,
+                    config['anthropic_api_key'],
+                    business_context=config.get('business_context'),
+                    role_context=config.get('role_context'),
+                )
                 task = classification.get('task', 'unknown')
                 confidence = classification.get('confidence', 0)
                 log(f"Classified: {task} ({confidence}%)")
