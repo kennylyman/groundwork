@@ -6,6 +6,7 @@ import { Activity, Users, Zap, TrendingUp, Clock, AlertCircle, FileText } from '
 import { useRouter } from 'next/navigation'
 import Link from 'next/link'
 import { PauseToggle, PausedBadge } from '@/components/PauseToggle'
+import { OpportunitiesTable } from '@/components/OpportunitiesTable'
 
 type EmployeeWithStatus = Employee & {
   latest_capture?: Capture
@@ -202,6 +203,11 @@ export default function Dashboard() {
               <p className="text-2xl font-semibold text-gray-900">{stat.value}</p>
             </div>
           ))}
+        </div>
+
+        {/* Opportunities — surface highest-leverage detected patterns first */}
+        <div className="mb-8">
+          <OpportunitiesTable />
         </div>
 
         {/* Employee Table */}
