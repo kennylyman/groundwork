@@ -2,7 +2,7 @@
 
 import Link from 'next/link'
 import { usePathname } from 'next/navigation'
-import { Building2, Plug, Users, DollarSign } from 'lucide-react'
+import { Building2, Plug, Users, DollarSign, Package } from 'lucide-react'
 import { DashboardNav } from '@/components/DashboardNav'
 
 const TABS = [
@@ -10,6 +10,7 @@ const TABS = [
   { href: '/settings/integrations', label: 'Integrations', icon: Plug },
   { href: '/settings/team', label: 'Team', icon: Users },
   { href: '/settings/pricing', label: 'Rates', icon: DollarSign },
+  { href: '/settings/releases', label: 'Releases', icon: Package },
 ] as const
 
 export default function SettingsLayout({

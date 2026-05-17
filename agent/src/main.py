@@ -9,6 +9,14 @@ from pathlib import Path
 
 import requests
 
+try:
+    from _version import VERSION
+except Exception:
+    # Should never hit this in a frozen build — GitHub Actions writes
+    # _version.py before PyInstaller runs. Fallback keeps `python main.py`
+    # working in dev.
+    VERSION = "0.0.0-dev"
+
 CONFIG_DIR = Path(os.environ.get('APPDATA', '.')) / 'Groundwork'
 CONFIG_DIR.mkdir(parents=True, exist_ok=True)
 LOG_FILE = CONFIG_DIR / 'groundwork.log'
@@ -20,6 +28,8 @@ ACTIVATION_URL = os.environ.get(
 )
 CAPTURE_INTERVAL = 30
 PAUSE_CHECK_EVERY = 5  # captures between pause-state polls
+# Soft-update cadence: re-check at most once an hour, only when idle (>60s).
+SOFT_UPDATE_CHECK_INTERVAL_SECONDS = 3600
 
 
 def log(msg: str) -> None:
@@ -330,6 +340,43 @@ def check_is_paused(config: dict) -> bool:
         return False
 
 
+def _maybe_soft_update(config: dict, last_check_at: float, idle_seconds: float) -> float:
+    """Inside the capture loop. Fires a soft update at the first idle
+    window after SOFT_UPDATE_CHECK_INTERVAL_SECONDS has passed. Idle =
+    user is away (>60s of no input), so the swap won't interrupt active
+    work.
+
+    Returns the new "last_check_at" timestamp — same value if we skipped,
+    updated if we ran a check.
+    """
+    if idle_seconds < 60:
+        return last_check_at
+    now = time.time()
+    if now - last_check_at < SOFT_UPDATE_CHECK_INTERVAL_SECONDS:
+        return last_check_at
+    try:
+        from updater import check_for_update, decide_action, perform_update
+    except Exception as e:
+        log(f"soft update: import failed: {e}")
+        return now
+    release = check_for_update(
+        ACTIVATION_URL, config.get("employee_id"), VERSION, log
+    )
+    if not release:
+        return now
+    action = decide_action(VERSION, release)
+    log(
+        f"soft update check: current={VERSION} "
+        f"latest={release.get('latest_version')} "
+        f"action={action}"
+    )
+    if action in ("hard", "soft"):
+        log(f"soft update: downloading v{release.get('latest_version')} (user idle)")
+        perform_update(release, CONFIG_DIR, log)
+        # If perform_update() returns, the update failed and we keep running.
+    return now
+
+
 def run_capture_loop(config: dict) -> None:
     from capture import build_context_snapshot, start_input_listeners
     from classify import classify_snapshot
@@ -350,6 +397,10 @@ def run_capture_loop(config: dict) -> None:
     recent_tasks: list[str] = []
     capture_count = 0
     is_paused = False
+    # Throttle soft-update checks. Init to "now" so the first opportunity
+    # is one full interval after startup (hard check on startup already
+    # ran in main()).
+    last_soft_update_check = time.time()
 
     while True:
         try:
@@ -381,6 +432,15 @@ def run_capture_loop(config: dict) -> None:
                 ok = transmit_capture(snapshot, classification, session_id, config)
                 log("Transmitted" if ok else "Transmit failed — queued locally")
 
+                # Opportunistic soft update at idle. perform_update() exits
+                # the process on success, so anything after this line only
+                # runs on no-op / failed-update paths.
+                last_soft_update_check = _maybe_soft_update(
+                    config,
+                    last_soft_update_check,
+                    snapshot.get("idle_seconds", 0),
+                )
+
         except Exception as e:
             log(f"Capture cycle error: {e}")
             log(traceback.format_exc())
@@ -390,9 +450,40 @@ def run_capture_loop(config: dict) -> None:
         time.sleep(CAPTURE_INTERVAL)
 
 
+def _maybe_hard_update(config: dict) -> None:
+    """Check /api/agent-version before the capture loop. If the current
+    build is below the min_supported floor, perform_update() exits the
+    process and the updater.bat takes over. Network failures fail open —
+    we log and continue.
+    """
+    try:
+        from updater import check_for_update, decide_action, perform_update
+    except Exception as e:
+        log(f"update module import failed: {e}")
+        return
+    release = check_for_update(
+        ACTIVATION_URL, config.get("employee_id"), VERSION, log
+    )
+    if not release:
+        return
+    action = decide_action(VERSION, release)
+    log(
+        f"update check: current={VERSION} "
+        f"latest={release.get('latest_version')} "
+        f"min_supported={release.get('min_supported_version')} "
+        f"action={action}"
+    )
+    if action == "hard":
+        log(f"hard update required → downloading v{release.get('latest_version')}")
+        perform_update(release, CONFIG_DIR, log)
+        # perform_update() exits on success. If it returned, the update
+        # failed and we continue running on the current build. Logged
+        # inside perform_update().
+
+
 def main() -> None:
     log("=" * 60)
-    log("Groundwork starting...")
+    log(f"Groundwork starting (agent v{VERSION})...")
     log(f"Python: {sys.version}")
     log(f"Executable: {sys.executable}")
     log(f"Config dir: {CONFIG_DIR}")
@@ -411,6 +502,8 @@ def main() -> None:
     log(f"Business: {config['business_id']}")
     log(f"Supabase URL: {'set' if config.get('supabase_url') else 'MISSING'}")
     log(f"Anthropic key: {'set' if config.get('anthropic_api_key') else 'MISSING'}")
+
+    _maybe_hard_update(config)
 
     run_capture_loop(config)
 
