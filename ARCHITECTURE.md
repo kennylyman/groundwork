@@ -1,6 +1,6 @@
 # Groundwork — Architecture
 
-> **Last updated: 2026-05-17** (commit-aligned).
+> **Last updated: 2026-05-17 (evening)** (commit-aligned).
 >
 > **Update protocol.** Any commit that changes the data flow, adds/removes
 > a top-level system component (table, API route, cron, adapter, external
@@ -551,24 +551,28 @@ safety net for tokens we haven't called recently.
 | `capability_registry` | 0011 | canonical 52-row taxonomy, source of truth for classify.py + dashboard | public read |
 | `agent_releases` | 0012 | version history; is_latest + is_min_supported flags; ci writes via promote_agent_release RPC | public read |
 | `workflow_intelligence_cache` | 0013 | 1h cache of /api/workflow-intelligence payload | owner |
+| `tool_call_logs` | 0015 | one row per callTool dispatch, sanitized args + result summary + duration + caller tag | owner |
 
 ### 7.2 API routes
 
 | Route | Auth | Trigger | Purpose |
 |---|---|---|---|
-| `/api/activate` | install_token | agent first launch | mint per-employee config bundle |
+| `/api/activate` | install_token | agent first launch | mint per-employee config bundle (now includes install_token in response) |
+| `/api/captures` | install_token header | agent transmit (v0.5.0+) | server-side capture ingestion with token validation; supersedes direct anon Supabase POST |
 | `/api/agent-version` | none | agent (startup + idle) | latest_version + sha + download_url + heartbeat write |
 | `/api/capabilities` | public | client | proxy capability_registry, 5min cache |
 | `/api/intake/chat` | session cookie | onboarding | Claude tool-calling intake flow |
 | `/api/intake/complete` | session cookie | onboarding | finalize, write business_profiles row |
+| `/api/intake/restart` | resolveOwner | settings/profile button | clear intake_completed_at/skipped_at so /team-onboarding renders IntakeChat again |
 | `/api/employee/[id]/acknowledge-role` | resolveEmployeeOwner | dashboard | accept/dismiss role discovery |
 | `/api/employee/accept-terms` | install_token | install page | stamp terms_accepted_at |
 | `/api/employee/set-pause` | resolveEmployeeOwner | dashboard | flip is_paused |
 | `/api/send-invite` | resolveOwner | dashboard | email install link |
 | `/api/detect-opportunities` | CRON_SECRET | cron 01:00 UTC | opportunity scoring |
 | `/api/discover-roles` | CRON_SECRET | cron 02:00 UTC | role discovery |
-| `/api/integrations/refresh-tokens` | CRON_SECRET | cron 03:30 UTC | rotate expiring OAuth tokens |
-| `/api/integrations/enrich-captures` | CRON_SECRET | cron 04:00 UTC | live tool context per capture |
+| `/api/integrations/refresh-tokens` | CRON_SECRET | cron 03:30 UTC | rotate expiring OAuth tokens (safety net; JIT in callTool is primary) |
+| `/api/integrations/enrich-captures` | CRON_SECRET | cron 04:00 UTC | live tool context per capture + synthetic integration_events |
+| `/api/heartbeat-digest` | CRON_SECRET | cron 13:30 UTC | email owners when any agent silent >24h |
 | `/api/workflow-intelligence` | resolveOwner | dashboard poll (5min) | Sonnet clustering, 1h cache |
 | `/api/generate-sop` | resolveEmployeeOwner | /sop page | long-form SOP doc |
 | `/api/generate-intelligence` | resolveEmployeeOwner | /sop page | owner intelligence doc |
@@ -591,7 +595,8 @@ safety net for tokens we haven't called recently.
 | `0 1 * * *` | `/api/detect-opportunities` | daily, reads 7d captures |
 | `0 2 * * *` | `/api/discover-roles` | daily, per-employee gating |
 | `30 3 * * *` | `/api/integrations/refresh-tokens` | safety-net rotation (JIT inside callTool is primary) |
-| `0 4 * * *` | `/api/integrations/enrich-captures` | last 24h enrichment pass |
+| `0 4 * * *` | `/api/integrations/enrich-captures` | last 24h enrichment pass + synthetic integration_events |
+| `30 13 * * *` | `/api/heartbeat-digest` | owner email when any agent silent >24h |
 
 All daily because Hobby plan caps cron frequency. Move to sub-daily after
 Pro upgrade.
@@ -641,110 +646,104 @@ Pro upgrade.
 
 > **Update.** This section is the honest backlog. Things that exist in
 > code but aren't fully realized in product. When something lands, move
-> it out of this list.
+> it out of this list and into Section 9.
 
-1. **`captures.capture_enrichments` is written but no UI reads it.**
-   The enrichment cron stamps live Slack/M365/Google context onto
-   captures, but neither the OpportunitiesTable, the
-   WorkflowIntelligenceMap, the SOP/Intelligence generators, nor the
-   employee detail page consume it. The data is sitting in jsonb
-   columns unread.
-   **Next move:** thread `capture_enrichments` into the workflow-map
-   cluster tooltips (highest visibility) and into the SOP generator's
-   prompt (highest leverage on document quality).
+All 12 gaps from the 2026-05-17 initial draft have been worked through.
+The remaining items below are either (a) standing operational notes
+that don't have a code fix or (b) follow-up work that's intentionally
+deferred.
 
-2. **`integration_events` boost only fires from Zapier, not native OAuth.**
-   The opportunity detector reads `integration_events` for the
-   "verified_via_zapier" confidence boost. Native OAuth connections
-   (Slack/M365/Google) never insert into this table. So a customer with
-   only native integrations sees no verification badges, even though
-   their tool data is more reliable than Zapier's.
-   **Next move:** emit synthetic `integration_events` rows from the
-   enrichment cron when adapters return meaningful data (e.g., a Slack
-   message in the channel matches an opportunity's tool name).
+1. **`captures_anon_insert` RLS policy tightening deferred to fleet
+   rollout.**
+   The agent-side change to POST captures through `/api/captures` (with
+   install_token validation) shipped in v0.5.0. The corresponding RLS
+   tightening — dropping the open `captures_anon_insert` policy in
+   favor of a deny-anon policy — is held back until the fleet has
+   rolled forward to v0.5.0+. Once `/settings/releases` shows 100% on
+   0.5.0 or higher (or `is_min_supported` is flipped to force it), a
+   follow-up migration tightens the policy.
 
-3. **`integration_events.capture_id` is nullable and never populated.**
-   The schema implies capture-event correlation but nothing in the
-   product computes it. If we ever want to say "this Zapier event
-   corresponds to that specific capture," we'd need a windowed-overlap
-   join that doesn't exist yet.
+2. **Hobby-plan cron cadence (operational, no code fix until upgrade).**
+   On Vercel Hobby, every cron is daily-only. That means:
+     - `enrich-captures` runs once at 04:00 UTC. A capture taken at
+       04:01 UTC waits ~24h for enrichment.
+     - `refresh-tokens` runs once at 03:30 UTC. M365 / Google tokens
+       expire hourly — JIT refresh inside `callTool` and
+       `buildContextWithRefresh` covers this for any actual call,
+       so the daily cron is a safety net, not the primary mechanism.
+     - `heartbeat-digest` runs once at 13:30 UTC. Owner gets at most
+       one digest per day.
+     - `detect-opportunities` and `discover-roles` are daily by design;
+       no change needed.
 
-4. **Agent heartbeat staleness has no alert.**
-   `employees.agent_version_updated_at` is written on every
-   `/api/agent-version` hit. If an agent stops checking in (crashed,
-   uninstalled, machine off for a week), the dashboard surfaces nothing.
-   `/settings/releases` shows fleet versions but doesn't flag stale
-   ones.
-   **Next move:** add a "last heartbeat" column to /settings/team and
-   /settings/releases, surface a banner if any agent silent >48h.
+   On Vercel Pro upgrade, restore sub-daily schedules in `vercel.json`:
+     - `enrich-captures` → `*/5 * * * *` (5 min)
+     - `refresh-tokens`  → `15 * * * *` (hourly)
+     - `heartbeat-digest` could move to twice-daily if owners want it
 
-5. **`captures_anon_insert` RLS policy is too permissive.**
-   Any anon-key holder can insert captures with any `business_id`
-   that exists. The install_token is supposed to be the real protection
-   but the DB doesn't enforce that relationship. Audit item from May 17.
-   **Next move:** route agent capture inserts through a server endpoint
-   that validates the install_token before writing, then tighten the
-   policy to deny anon inserts entirely.
+   No other code changes needed for Pro — schedule strings only.
 
-6. **Intake can't be re-run from settings.**
-   `IntakeChat` only lives at `/team-onboarding`. If an owner wants to
-   correct or extend the business profile after first-time setup, they
-   have to edit fields inline at `/settings/profile`; there's no path
-   to re-do the conversational intake.
-
-7. **`/settings/releases` min_supported version flag is untested in prod.**
-   The schema and UI both support flipping `is_min_supported` to force
-   the fleet to update. The path has unit-tested helpers (`version_lt`,
-   `decide_action`) but no end-to-end prod validation that the chain
-   from settings click → agent_releases update → agent hard-update
-   actually works under load.
-
-8. **Workflow Intelligence Map doesn't consume capture_enrichments
-   OR integration_events.**
-   Mentioned in #1 + #2 separately. Calling it out explicitly here
-   because the map is the most user-visible surface and adding live
-   tool context to cluster hover would be the biggest visible payoff
-   from the OAuth foundation.
-
-9. **No agent auto-update canary / soak.**
-   Once a release lands in `agent_releases` with `is_latest=true`,
-   every fleet agent picks it up at next startup or idle window. There's
-   no `is_canary` flag, no staged rollout, no rollback channel beyond
-   manual revert at the GitHub Releases asset.
-   **Next move at scale:** add `is_canary` + percent-rollout fraction
-   to `agent_releases`, gate agent self-update on a hash-of-employee-id
-   threshold.
-
-10. **`capabilities` field on captures is opaque in the UI.**
-    Every capture row has a `jsonb capabilities[]` populated by the
-    classifier. The opportunity detector groups by these; the Workflow
-    Map clusters reference them indirectly. But there's no surface
-    that lets an owner say "show me every capture tagged
-    `data.entry.form_fill` for Sarah" — the raw tag stream is invisible
-    to product users.
-
-11. **No `tool_call_log` table.**
-    `callTool` logs to Vercel function output only. When Phase 5
-    automation execution starts firing real tool calls on customers'
-    accounts, we'll want a durable audit trail. Mentioned in the OAuth
-    foundation commit; deferred.
-
-12. **Hobby-plan cron cadence degrades enrichment + token freshness.**
-    `/api/integrations/enrich-captures` runs daily at 04:00 UTC. A
-    capture taken at 04:01 UTC waits ~24h for enrichment.
-    `/api/integrations/refresh-tokens` runs daily; M365 / Google
-    tokens expire hourly. JIT refresh inside `callTool` covers this
-    for any code path that actually calls a tool, but **the enrichment
-    cron itself uses `buildContextWithRefresh`** so its refresh
-    behavior is sound. Pro upgrade restores per-minute enrichment and
-    hourly token refresh; until then this is the steady-state
-    degradation.
+3. **No automation execution surface yet (Phase 5).**
+   `callTool` is the runtime primitive Phase 5 will use to actually
+   execute approved automations. The `tool_call_logs` table is in
+   place. The Workflow Intelligence Map's cluster panel is
+   intentionally read-only ("Build this automation" button absent).
+   Not a gap so much as the next major phase.
 
 ---
 
 ## 9. Recent Architectural Changes
 
 > Newest first. Trim entries older than 6 months.
+
+- **2026-05-17 (evening)** — Worked through all 12 gaps from the
+  initial 2026-05-17 ARCHITECTURE.md draft. Notable adds:
+  - **Heartbeat alerts**: `lib/agent-heartbeat.ts` computes per-
+    employee status; dashboard surfaces "Agent quiet" / "Agent silent"
+    pills; `/api/heartbeat-digest` (daily 13:30 UTC) emails owners
+    when agents are silent >24h. Resend integration extended.
+  - **Server-side capture ingestion**: `/api/captures` validates
+    `X-Groundwork-Install-Token`, writes via service role. `transmit.py`
+    prefers the new path when `install_token` is in config, falls back
+    to legacy anon-direct otherwise. `/api/activate` now returns the
+    token. Agent bumped to v0.5.0. RLS tightening deferred until
+    fleet rollout completes.
+  - **`capture_enrichments` surfaced**: new
+    `CaptureEnrichmentSummary` component, inline on the employee
+    timeline (`/employee/[id]`) and full-detail in the cluster panel.
+    The cluster panel fetches per-task enrichments on open.
+  - **Native enrichments → `integration_events`**: enrich-captures
+    cron now writes synthetic events (tool_name mapped to the
+    per-product vocabulary the detector uses) so the
+    verified-via-events confidence boost fires for native OAuth
+    integrations, not just Zapier. Also populates
+    `integration_events.capture_id`.
+  - **Re-run intake**: `/api/intake/restart` clears
+    `intake_completed_at` / `intake_skipped_at`; settings/profile
+    button posts to it before navigating to `/team-onboarding` so
+    the IntakeChat actually renders.
+  - **`tool_call_logs` audit**: migration 0015 added the table.
+    `lib/integrations-runtime` records every callTool dispatch
+    (success or failure) with sanitized args + duration + caller tag.
+  - **Canary releases**: migration 0016 added `is_canary` +
+    `canary_employee_ids` on `agent_releases` + the
+    `set_agent_release_canary` RPC. `/api/agent-version` returns the
+    canary release as "latest" only for employees in the canary list
+    and only if it's strictly newer than the stable latest.
+    `/api/settings/releases` PATCH gained a `set_canary` action with
+    cross-business id validation.
+  - **Capability tags on timeline**: employee detail page rows are
+    now expandable; expanding shows the raw `capabilities[]` tags
+    with their `params` and confidence.
+  - **min_supported test**: `agent/tests/test_updater.py` (14 unit
+    tests) covers `version_lt`, `decide_action`, the
+    URL-safety check on download URLs. Run via
+    `PYTHONPATH=src python -m unittest tests.test_updater`.
+  - **Workflow Map consumes enrichments**:
+    `/api/workflow-intelligence` now summarizes
+    `capture_enrichments` per task (most recent enriched capture
+    wins) and passes the summary into the Sonnet clustering prompt
+    so clusters can use live tool context, not just screen-text.
 
 - **2026-05-17** — Added Google Workspace native adapter (`adapters/google.ts`),
   third in the OAuth pattern. Closes the Microsoft-only gap.

@@ -106,29 +106,73 @@ export async function PATCH(request: NextRequest) {
     return NextResponse.json({ error: 'unauthorized' }, { status: 401 })
   }
 
-  let body: { action?: string; version?: string | null }
+  let body: {
+    action?: string
+    version?: string | null
+    employee_ids?: string[] | null
+  }
   try {
     body = await request.json()
   } catch {
     return NextResponse.json({ error: 'invalid JSON' }, { status: 400 })
   }
 
-  if (body.action !== 'set_min_supported') {
-    return NextResponse.json({ error: 'unknown action' }, { status: 400 })
-  }
-
-  // version === null clears the floor.
-  const version = body.version ? String(body.version).trim() : null
-
   const supabase = serverSupabase()
-  const { error } = await supabase.rpc('set_agent_min_supported', {
-    p_version: version,
-  })
-  if (error) {
-    console.error('settings/releases: set_agent_min_supported failed', error)
-    const status = /unknown version/.test(error.message) ? 400 : 500
-    return NextResponse.json({ error: error.message }, { status })
+
+  if (body.action === 'set_min_supported') {
+    const version = body.version ? String(body.version).trim() : null
+    const { error } = await supabase.rpc('set_agent_min_supported', {
+      p_version: version,
+    })
+    if (error) {
+      console.error('settings/releases: set_agent_min_supported failed', error)
+      const status = /unknown version/.test(error.message) ? 400 : 500
+      return NextResponse.json({ error: error.message }, { status })
+    }
+    return NextResponse.json({ ok: true })
   }
 
-  return NextResponse.json({ ok: true })
+  if (body.action === 'set_canary') {
+    const version = body.version ? String(body.version).trim() : null
+    if (!version) {
+      return NextResponse.json({ error: 'version required' }, { status: 400 })
+    }
+    // employee_ids === null / [] => clear canary (revert to non-canary).
+    const ids =
+      Array.isArray(body.employee_ids) && body.employee_ids.length > 0
+        ? body.employee_ids.filter((s): s is string => typeof s === 'string')
+        : null
+
+    // Sanity check: every employee_id must belong to the caller's
+    // business. Without this, an owner could canary-target employees
+    // from another tenant.
+    if (ids && ids.length > 0) {
+      const { data: scopedEmps } = await supabase
+        .from('employees')
+        .select('id')
+        .eq('business_id', owner.business.id)
+        .in('id', ids)
+      const allowed = new Set((scopedEmps ?? []).map((e) => e.id))
+      const foreign = ids.filter((id) => !allowed.has(id))
+      if (foreign.length > 0) {
+        return NextResponse.json(
+          { error: `employees not in your business: ${foreign.join(', ')}` },
+          { status: 403 }
+        )
+      }
+    }
+
+    const { error } = await supabase.rpc('set_agent_release_canary', {
+      p_version: version,
+      p_employee_ids: ids,
+    })
+    if (error) {
+      console.error('settings/releases: set_agent_release_canary failed', error)
+      const status = /unknown version/.test(error.message) ? 400 : 500
+      return NextResponse.json({ error: error.message }, { status })
+    }
+    return NextResponse.json({ ok: true })
+  }
+
+  return NextResponse.json({ error: 'unknown action' }, { status: 400 })
 }

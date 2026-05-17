@@ -27,8 +27,29 @@ type ReleaseRow = {
   release_notes: string | null
 }
 
+/** Parse "0.5.0" into [0, 5, 0]. Returns [] if input is unparseable so
+ *  comparisons against it cleanly say "stable wins". */
+function parseVersionTuple(v: string | null): number[] {
+  if (!v) return []
+  const raw = v.split('-')[0]
+  const parts = raw.split('.').map((p) => Number(p))
+  if (parts.some((n) => !Number.isFinite(n))) return []
+  return parts
+}
+
+function compareVersionTuples(a: number[], b: number[]): number {
+  const len = Math.max(a.length, b.length)
+  for (let i = 0; i < len; i++) {
+    const ai = a[i] ?? 0
+    const bi = b[i] ?? 0
+    if (ai !== bi) return ai - bi
+  }
+  return 0
+}
+
 export async function GET(request: NextRequest) {
   const supabase = serverSupabase()
+  const employeeId = request.nextUrl.searchParams.get('employee_id')?.trim()
 
   // Pull latest + min_supported in parallel. Both can legitimately be
   // missing (fresh deploy, no releases yet) — the agent treats null
@@ -46,13 +67,40 @@ export async function GET(request: NextRequest) {
       .maybeSingle(),
   ])
 
-  const latest = latestRes.data as ReleaseRow | null
+  let latest = latestRes.data as ReleaseRow | null
   const minSupportedVersion = (minSupportedRes.data?.version as string | undefined) ?? null
+
+  // Canary check: when the request identifies the employee, look for a
+  // canary release whose canary_employee_ids array includes this id. If
+  // found AND it's a newer version than the current stable latest,
+  // override the response so this specific agent gets the canary.
+  // Without a valid employee_id (settings-page polling, generic probe),
+  // the canary lookup is skipped and we return the stable latest.
+  if (employeeId) {
+    const { data: canaryRow } = await supabase
+      .from('agent_releases')
+      .select('version, download_url, sha256, release_notes')
+      .eq('is_canary', true)
+      .contains('canary_employee_ids', [employeeId])
+      .order('released_at', { ascending: false })
+      .limit(1)
+      .maybeSingle()
+    if (canaryRow) {
+      // Only return the canary if it's a strictly newer version than the
+      // current stable latest. Otherwise serving an older canary would
+      // downgrade the agent — never what we want.
+      const stableV = parseVersionTuple(latest?.version ?? null)
+      const canaryV = parseVersionTuple((canaryRow.version as string) ?? null)
+      if (canaryV.length > 0 && compareVersionTuples(canaryV, stableV) > 0) {
+        latest = canaryRow as ReleaseRow
+      }
+    }
+  }
 
   // Heartbeat write — fire-and-forget from the caller's perspective.
   // We await it so the function doesn't return before the write commits,
-  // but failures don't propagate.
-  const employeeId = request.nextUrl.searchParams.get('employee_id')?.trim()
+  // but failures don't propagate. employeeId was already pulled above for
+  // the canary lookup.
   const currentVersion = request.nextUrl.searchParams.get('current_version')?.trim()
   if (employeeId && currentVersion) {
     const { error: hbErr } = await supabase

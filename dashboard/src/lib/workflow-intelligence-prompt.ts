@@ -18,6 +18,12 @@ export type PromptEmployeeTask = {
   capability_ids: string[]
   automation_potential: string | null
   category: string | null
+  /** Optional live tool context distilled from capture_enrichments. When
+   *  present, Sonnet sees something like
+   *    enrichment="outlook: meeting \"Q3 invoicing review\"; unread ..."
+   *  alongside the task line — clusters can be informed by the actual
+   *  email/calendar/Teams context, not just the screen-text task. */
+  enrichment?: string | null
 }
 
 export type PromptEmployee = {
@@ -49,6 +55,13 @@ function formatEmployees(employees: PromptEmployee[]): string {
       lines.push(
         `  - "${t.task}"  freq=${t.count}${sw}${tags}${auto}`
       )
+      // When live tool context is available for this task, add it as a
+      // sub-line. Sonnet's clustering can use this to distinguish e.g.
+      // "drafting customer reply" (CRM context) from "drafting internal
+      // email" (Slack context) when the surface task text is similar.
+      if (t.enrichment) {
+        lines.push(`      context: ${t.enrichment}`)
+      }
     }
     if (emp.tasks.length === 0) {
       lines.push('  (no tagged tasks in window)')

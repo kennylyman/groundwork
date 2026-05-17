@@ -3,6 +3,7 @@
 import { useEffect, useState } from 'react'
 import { supabase, Employee, Capture } from '@/lib/supabase'
 import { CaptureEnrichmentSummary } from '@/components/CaptureEnrichmentSummary'
+import { useCapabilities } from '@/lib/capabilities-client'
 import { Zap, Clock, Activity, TrendingUp } from 'lucide-react'
 import { use } from 'react'
 import { PauseToggle, PausedBadge } from '@/components/PauseToggle'
@@ -29,6 +30,8 @@ export default function EmployeePage({ params }: { params: Promise<{ id: string 
   const [captures, setCaptures] = useState<Capture[]>([])
   const [roleProfile, setRoleProfile] = useState<RoleProfile | null>(null)
   const [loading, setLoading] = useState(true)
+  const [expandedCapture, setExpandedCapture] = useState<string | null>(null)
+  const { capabilityLabel } = useCapabilities()
 
   useEffect(() => {
     loadEmployee()
@@ -222,27 +225,112 @@ export default function EmployeePage({ params }: { params: Promise<{ id: string 
             <p className="text-xs text-gray-500 mt-0.5">{captures.length} captures today</p>
           </div>
           <div className="divide-y divide-gray-50 max-h-96 overflow-y-auto">
-            {captures.map((cap) => (
-              <div key={cap.id} className="px-6 py-3 flex items-start gap-4">
-                <span className="text-xs text-gray-400 w-16 shrink-0 pt-0.5">
-                  {new Date(cap.captured_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
-                </span>
-                <div className="flex-1 min-w-0">
-                  <p className="text-xs text-gray-800">{cap.task}</p>
-                  <p className="text-xs text-gray-400 mt-0.5">{cap.category} · {cap.software}</p>
-                  <CaptureEnrichmentSummary
-                    enrichments={cap.capture_enrichments}
-                    variant="inline"
-                  />
+            {captures.map((cap) => {
+              const tags = Array.isArray(cap.capabilities) ? cap.capabilities : []
+              const isExpanded = expandedCapture === cap.id
+              const canExpand = tags.length > 0
+              return (
+                <div key={cap.id}>
+                  <button
+                    type="button"
+                    onClick={() =>
+                      canExpand &&
+                      setExpandedCapture(isExpanded ? null : cap.id)
+                    }
+                    className={`w-full px-6 py-3 flex items-start gap-4 text-left ${
+                      canExpand
+                        ? 'cursor-pointer hover:bg-gray-50/60'
+                        : 'cursor-default'
+                    }`}
+                  >
+                    <span className="text-xs text-gray-400 w-16 shrink-0 pt-0.5">
+                      {new Date(cap.captured_at).toLocaleTimeString([], {
+                        hour: '2-digit',
+                        minute: '2-digit',
+                      })}
+                    </span>
+                    <div className="flex-1 min-w-0">
+                      <div className="flex items-center gap-2">
+                        <p className="text-xs text-gray-800">{cap.task}</p>
+                        {canExpand && (
+                          <span className="text-[10px] text-gray-400 shrink-0">
+                            {tags.length} cap{tags.length === 1 ? '' : 's'}
+                            {isExpanded ? ' ▾' : ' ▸'}
+                          </span>
+                        )}
+                      </div>
+                      <p className="text-xs text-gray-400 mt-0.5">
+                        {cap.category} · {cap.software}
+                      </p>
+                      <CaptureEnrichmentSummary
+                        enrichments={cap.capture_enrichments}
+                        variant="inline"
+                      />
+                    </div>
+                    <div className="flex items-center gap-2 shrink-0">
+                      <span
+                        className={`text-xs px-2 py-0.5 rounded-full border font-medium ${
+                          AUTOMATION_COLORS[cap.automation_potential] || ''
+                        }`}
+                      >
+                        {cap.automation_potential}
+                      </span>
+                      <span className="text-xs text-gray-400">
+                        {cap.confidence}%
+                      </span>
+                    </div>
+                  </button>
+                  {isExpanded && canExpand && (
+                    <div className="px-6 pb-4 pl-[88px] space-y-2 bg-gray-50/40 border-t border-gray-100">
+                      <p className="text-[10px] uppercase tracking-wider text-gray-500 font-medium pt-3">
+                        Capability tags
+                      </p>
+                      {tags.map((tag, i) => {
+                        const params = tag.params ?? {}
+                        const paramKeys = Object.keys(params)
+                        return (
+                          <div
+                            key={i}
+                            className="bg-white border border-gray-200 rounded-lg px-3 py-2"
+                          >
+                            <div className="flex items-baseline justify-between gap-2">
+                              <span className="text-xs font-medium text-gray-900 truncate">
+                                {capabilityLabel(tag.id)}
+                              </span>
+                              <div className="flex items-center gap-2 shrink-0">
+                                <code className="text-[10px] text-gray-400">
+                                  {tag.id}
+                                </code>
+                                {typeof tag.confidence === 'number' && (
+                                  <span className="text-[10px] text-gray-500">
+                                    {tag.confidence}%
+                                  </span>
+                                )}
+                              </div>
+                            </div>
+                            {paramKeys.length > 0 && (
+                              <div className="mt-1.5 flex flex-wrap gap-1">
+                                {paramKeys.map((k) => (
+                                  <span
+                                    key={k}
+                                    className="text-[10px] px-1.5 py-0.5 rounded bg-gray-100 text-gray-600"
+                                  >
+                                    <span className="text-gray-500">{k}:</span>{' '}
+                                    {String(
+                                      (params as Record<string, unknown>)[k]
+                                    ).slice(0, 60)}
+                                  </span>
+                                ))}
+                              </div>
+                            )}
+                          </div>
+                        )
+                      })}
+                    </div>
+                  )}
                 </div>
-                <div className="flex items-center gap-2 shrink-0">
-                  <span className={`text-xs px-2 py-0.5 rounded-full border font-medium ${AUTOMATION_COLORS[cap.automation_potential] || ''}`}>
-                    {cap.automation_potential}
-                  </span>
-                  <span className="text-xs text-gray-400">{cap.confidence}%</span>
-                </div>
-              </div>
-            ))}
+              )
+            })}
             {captures.length === 0 && (
               <div className="px-6 py-8 text-center">
                 <p className="text-xs text-gray-400">No captures today yet</p>

@@ -70,11 +70,13 @@ const MODEL = 'claude-sonnet-4-20250514'
 
 type CaptureRow = {
   employee_id: string
+  captured_at: string
   task: string | null
   category: string | null
   software: string | null
   automation_potential: string | null
   capabilities: Array<{ id: string }> | null
+  capture_enrichments: Record<string, unknown> | null
 }
 
 type EmployeeRow = {
@@ -84,6 +86,15 @@ type EmployeeRow = {
   role: string | null
 }
 
+type EnrichmentSummary = {
+  /** Compact one-line summary of the most recent enriched capture for
+   *  this task. Fed into the Sonnet prompt so clusters can be informed
+   *  by live tool context (Slack channel topic, calendar meeting,
+   *  unread email subject), not just the screen-text task. */
+  summary: string
+  source_tool: string
+}
+
 type TaskAggregate = {
   task: string
   count: number
@@ -91,6 +102,9 @@ type TaskAggregate = {
   software: string | null
   automation_potential: AutomationPotential
   capability_ids: string[]
+  /** Most recent enrichment seen for this task, if any. Drives the
+   *  Sonnet prompt's per-task context line. */
+  enrichment?: EnrichmentSummary
 }
 
 // ----- Helpers ------------------------------------------------------------
@@ -116,8 +130,62 @@ function normalizeAutomationClass(v: string | null | undefined): AutomationClass
 }
 
 /** Aggregate per-employee top tasks by text. */
+/** Distill a capture's capture_enrichments jsonb into a one-line summary
+ *  the Sonnet clustering prompt can consume. Returns null when there's
+ *  nothing useful to say (adapter ran but found no events, or the row
+ *  predates the enrichment feature). */
+function summarizeEnrichment(
+  enrich: Record<string, unknown> | null | undefined
+): EnrichmentSummary | null {
+  if (!enrich || typeof enrich !== 'object') return null
+  for (const [tool, payload] of Object.entries(enrich)) {
+    if (!payload || typeof payload !== 'object') continue
+    const p = payload as Record<string, unknown>
+    if (tool === 'slack') {
+      const messages = Array.isArray(p.messages) ? p.messages : []
+      if (messages.length === 0) continue
+      const sample = messages.slice(0, 3).map((m) => {
+        const mm = m as { text?: string }
+        return (mm.text ?? '').slice(0, 80)
+      }).join(' | ')
+      return {
+        source_tool: 'slack',
+        summary: `Slack channel context: ${sample}`,
+      }
+    }
+    if (tool === 'microsoft-365' || tool === 'google-workspace') {
+      const events = Array.isArray(p.calendar_events) ? p.calendar_events : []
+      const emails = Array.isArray(p.unread_emails) ? p.unread_emails : []
+      if (events.length === 0 && emails.length === 0) continue
+      const parts: string[] = []
+      if (events.length > 0) {
+        const first = events[0] as { subject?: string }
+        parts.push(`meeting "${(first.subject ?? '').slice(0, 80)}"`)
+      }
+      if (emails.length > 0) {
+        const first = emails[0] as { subject?: string; from?: string | null }
+        parts.push(
+          `unread "${(first.subject ?? '').slice(0, 60)}" from ${first.from ?? '?'}`
+        )
+      }
+      const surface =
+        typeof p.surface === 'string' ? p.surface : tool
+      return {
+        source_tool: tool,
+        summary: `${surface}: ${parts.join('; ')}`,
+      }
+    }
+  }
+  return null
+}
+
 function aggregateTasks(captures: CaptureRow[]): Map<string, TaskAggregate[]> {
   const perEmployee = new Map<string, Map<string, TaskAggregate>>()
+  // Track which task we've already attached an enrichment summary to —
+  // we want the MOST RECENT enriched capture's summary per task. The
+  // captures input isn't guaranteed to be sorted, so we look at every
+  // row and keep the freshest one.
+  const enrichmentSeenAt = new Map<string, string>() // "empId::task" -> captured_at
   for (const cap of captures) {
     if (!cap.employee_id || !cap.task) continue
     const taskText = cap.task.trim()
@@ -144,6 +212,19 @@ function aggregateTasks(captures: CaptureRow[]): Map<string, TaskAggregate[]> {
         automation_potential: normalizePotential(cap.automation_potential),
         capability_ids: [...capabilityIds],
       })
+    }
+
+    // Try to attach an enrichment summary. Keep only the freshest one
+    // per (employee, task) pair.
+    const enrichSummary = summarizeEnrichment(cap.capture_enrichments)
+    if (enrichSummary) {
+      const key = `${cap.employee_id}::${taskText}`
+      const prev = enrichmentSeenAt.get(key)
+      if (!prev || cap.captured_at > prev) {
+        const aggregate = bucket.get(taskText)
+        if (aggregate) aggregate.enrichment = enrichSummary
+        enrichmentSeenAt.set(key, cap.captured_at)
+      }
     }
   }
 
@@ -362,7 +443,7 @@ async function computeFresh(
     supabase
       .from('captures')
       .select(
-        'employee_id, task, category, software, automation_potential, capabilities'
+        'employee_id, captured_at, task, category, software, automation_potential, capabilities, capture_enrichments'
       )
       .eq('business_id', businessId)
       .gte('captured_at', since)
@@ -422,6 +503,7 @@ async function computeFresh(
         capability_ids: t.capability_ids,
         automation_potential: t.automation_potential,
         category: t.category,
+        enrichment: t.enrichment?.summary ?? null,
       }))
     return { id: e.id, name: e.name, role: e.role, tasks: promptTasks }
   })
