@@ -24,11 +24,31 @@ const MAX_TRANSCRIPT_MESSAGES = 30
 
 const SYSTEM_PROMPT = `You are the Groundwork onboarding agent. Your job is to interview a business owner for ~5 minutes and build a structured profile of their business that will sharpen everything Groundwork does downstream — classifying employee work, surfacing automation opportunities, generating SOPs.
 
+============================================================
+HARDEST RULE — read this twice. The product breaks without it.
+============================================================
+
+EVERY SINGLE RESPONSE YOU PRODUCE MUST CONTAIN EXACTLY ONE OF:
+  (a) ask_clarifying_question — to continue the conversation
+  (b) signal_intake_complete  — to end it
+
+NEVER NEITHER. NEVER BOTH.
+
+If you also have new information to record, call update_profile_fields FIRST (one or more times), THEN call exactly one of (a) or (b). The order is: extract → ask (or complete).
+
+If you have nothing fresh to extract this turn, still call exactly one of (a) or (b). The user sees nothing if you only call update_profile_fields — the chat will appear frozen and they'll see a "Sorry, I lost my train of thought" apology that you produced for no reason.
+
+To verify before responding: count the tool calls in your reply. If there's no ask_clarifying_question AND no signal_intake_complete, your reply is broken. Add one before sending.
+
+============================================================
+Tone & approach
+============================================================
+
 You are warm, fast, and practical. You ask one clear question at a time. You never ask the owner something you can already answer from what they've said. You build the profile incrementally — calling update_profile_fields whenever you learn something concrete, even mid-thought.
 
 THE PROFILE you're building:
-- business_name (REQUIRED)
-- industry (REQUIRED, e.g. "Home Care", "Real Estate", "Legal", "Accounting")
+- business_name (REQUIRED for completion)
+- industry (REQUIRED for completion, e.g. "Home Care", "Real Estate", "Legal", "Accounting")
 - sub_industry (a richer description, e.g. "non-medical home care, ~50 caregivers, Medicaid + private pay, Chicago suburbs")
 - size_band (rough: "solo", "small (2-10)", "small (10-50)", "medium (50-200)", "large")
 - owner_name
@@ -47,10 +67,8 @@ QUESTION ORDER (suggested, not rigid):
 5. If you could wave a wand and automate one thing, what would it be?
 6. Anything regulatory we should know about?
 
-You always call update_profile_fields BEFORE asking your next question whenever you've learned anything from the most recent message. Be liberal in what you tag — partial info is better than nothing. Set confidence accordingly (high if owner stated it clearly, lower if you're inferring).
-
-CRITICAL CONSTRAINTS:
-- DO NOT call signal_intake_complete until business_name and industry are populated.
+Other constraints:
+- DO NOT call signal_intake_complete until business_name AND industry are populated.
 - DO NOT re-ask things already in the profile unless the owner volunteers a contradiction.
 - DO NOT ask more than one question per turn.
 - If the owner says "skip" / "I'm done" / "next" / similar — stop interviewing, call signal_intake_complete with a short summary.
@@ -115,6 +133,116 @@ function profileSummaryForPrompt(profile: BusinessProfileDraft): string {
   return rows.join('\n')
 }
 
+// Tool definitions hoisted to module scope so the main call + the retry can
+// share them without re-allocating.
+const INTAKE_TOOLS: Anthropic.Messages.Tool[] = [
+  {
+    name: 'update_profile_fields',
+    description:
+      "Apply one or more updates to the business profile. Call this whenever you've learned something concrete from the most recent message, before asking your next question.",
+    input_schema: {
+      type: 'object',
+      properties: {
+        updates: {
+          type: 'array',
+          description: 'Array of field updates.',
+          items: {
+            type: 'object',
+            properties: {
+              field: {
+                type: 'string',
+                description:
+                  'Profile field name. One of: business_name, owner_name, industry, sub_industry, size_band, operations_vocab, tool_stack, workflows, pain_points, roles, compliance_constraints',
+              },
+              value: {
+                description:
+                  'New value for the field. String for text fields, object/array for structured fields. Replaces the existing value.',
+              },
+              confidence: {
+                type: 'number',
+                description: '0-1. How sure you are about this value.',
+              },
+            },
+            required: ['field', 'value'],
+          },
+        },
+      },
+      required: ['updates'],
+    },
+  },
+  {
+    name: 'ask_clarifying_question',
+    description:
+      "Ask the owner the next question. Required for every turn that isn't a completion. See the HARDEST RULE in the system prompt.",
+    input_schema: {
+      type: 'object',
+      properties: {
+        question: {
+          type: 'string',
+          description: 'The next message to send to the owner. One question, warm tone.',
+        },
+      },
+      required: ['question'],
+    },
+  },
+  {
+    name: 'signal_intake_complete',
+    description:
+      'Signal that you have a good enough sketch of the business and should hand off to the next step. Only call this once business_name and industry are populated, OR the owner explicitly asks to skip/end.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        summary: {
+          type: 'string',
+          description:
+            'One-sentence summary of what you learned, e.g. "50-caregiver home care agency in Chicago suburbs, uses WellSky + QuickBooks, biggest pain is missed-visit notifications."',
+        },
+      },
+      required: ['summary'],
+    },
+  },
+]
+
+type ParsedReply = {
+  updates: ProfileUpdate[]
+  message: string | null
+  isComplete: boolean
+  completionSummary: string | null
+}
+
+function parseAssistantResponse(
+  content: Anthropic.Messages.ContentBlock[]
+): ParsedReply {
+  const updates: ProfileUpdate[] = []
+  let message: string | null = null
+  let isComplete = false
+  let completionSummary: string | null = null
+
+  for (const block of content) {
+    if (block.type === 'tool_use') {
+      const tu = block as unknown as ToolUseBlock
+      if (tu.name === 'update_profile_fields') {
+        const arr = (tu.input as { updates?: ProfileUpdate[] }).updates
+        if (Array.isArray(arr)) updates.push(...arr)
+      } else if (tu.name === 'ask_clarifying_question') {
+        const q = (tu.input as { question?: string }).question
+        if (typeof q === 'string' && q.trim()) message = q.trim()
+      } else if (tu.name === 'signal_intake_complete') {
+        isComplete = true
+        const s = (tu.input as { summary?: string }).summary
+        if (typeof s === 'string') completionSummary = s
+      }
+    } else if (block.type === 'text') {
+      const tb = block as TextBlock
+      // Stray text alongside tool calls is rare but legal; only use as a
+      // fallback message when no ask_clarifying_question fired.
+      if (!message && tb.text.trim()) message = tb.text.trim()
+    }
+  }
+
+  return { updates, message, isComplete, completionSummary }
+}
+
 export async function POST(request: NextRequest) {
   try {
     const body = await request.json()
@@ -151,110 +279,69 @@ The owner's transcript follows.`
             ...recent,
           ]
 
-    const response = await client.messages.create({
-      model: MODEL,
-      max_tokens: 800,
-      system: [
-        {
-          type: 'text',
-          text: SYSTEM_PROMPT,
-          cache_control: { type: 'ephemeral' },
-        },
-      ],
-      tools: [
-        {
-          name: 'update_profile_fields',
-          description:
-            "Apply one or more updates to the business profile. Call this whenever you've learned something concrete from the most recent message, before asking your next question.",
-          input_schema: {
-            type: 'object',
-            properties: {
-              updates: {
-                type: 'array',
-                description: 'Array of field updates.',
-                items: {
-                  type: 'object',
-                  properties: {
-                    field: {
-                      type: 'string',
-                      description:
-                        'Profile field name. One of: business_name, owner_name, industry, sub_industry, size_band, operations_vocab, tool_stack, workflows, pain_points, roles, compliance_constraints',
-                    },
-                    value: {
-                      description:
-                        'New value for the field. String for text fields, object/array for structured fields. Replaces the existing value.',
-                    },
-                    confidence: {
-                      type: 'number',
-                      description: '0-1. How sure you are about this value.',
-                    },
-                  },
-                  required: ['field', 'value'],
-                },
-              },
-            },
-            required: ['updates'],
-          },
-        },
-        {
-          name: 'ask_clarifying_question',
-          description:
-            'Ask the owner the next question. Use this for every conversational turn (except the rare cases where the right move is to call signal_intake_complete instead).',
-          input_schema: {
-            type: 'object',
-            properties: {
-              question: {
-                type: 'string',
-                description: 'The next message to send to the owner. One question, warm tone.',
-              },
-            },
-            required: ['question'],
-          },
-        },
-        {
-          name: 'signal_intake_complete',
-          description:
-            'Signal that you have a good enough sketch of the business and should hand off to the next step. Only call this once business_name and industry are populated, OR the owner explicitly asks to skip/end.',
-          input_schema: {
-            type: 'object',
-            properties: {
-              summary: {
-                type: 'string',
-                description: 'One-sentence summary of what you learned, e.g. "50-caregiver home care agency in Chicago suburbs, uses WellSky + QuickBooks, biggest pain is missed-visit notifications."',
-              },
-            },
-            required: ['summary'],
-          },
-        },
-      ],
-      messages: apiMessages,
-    })
+    // First call. If it comes back with profile updates but no terminal tool
+    // call (ask_clarifying_question / signal_intake_complete), the chat will
+    // appear stalled. We apply the updates from call #1 and retry once with
+    // a forcing nudge — the system prompt also has the hard rule, but the
+    // retry is belt-and-suspenders.
 
-    // Parse response: collect updates, find the question or completion.
-    const collectedUpdates: ProfileUpdate[] = []
-    let assistantMessage: string | null = null
-    let isComplete = false
-    let completionSummary: string | null = null
+    async function callModel(messages: typeof apiMessages) {
+      return client.messages.create({
+        model: MODEL,
+        max_tokens: 800,
+        system: [
+          {
+            type: 'text',
+            text: SYSTEM_PROMPT,
+            cache_control: { type: 'ephemeral' },
+          },
+        ],
+        tools: INTAKE_TOOLS,
+        messages,
+      })
+    }
 
-    for (const block of response.content) {
-      if (block.type === 'tool_use') {
-        const tu = block as unknown as ToolUseBlock
-        if (tu.name === 'update_profile_fields') {
-          const updates = (tu.input as { updates?: ProfileUpdate[] }).updates
-          if (Array.isArray(updates)) collectedUpdates.push(...updates)
-        } else if (tu.name === 'ask_clarifying_question') {
-          const q = (tu.input as { question?: string }).question
-          if (typeof q === 'string') assistantMessage = q
-        } else if (tu.name === 'signal_intake_complete') {
+    const firstResponse = await callModel(apiMessages)
+    const firstParsed = parseAssistantResponse(firstResponse.content)
+
+    let collectedUpdates = firstParsed.updates
+    let assistantMessage = firstParsed.message
+    let isComplete = firstParsed.isComplete
+    let completionSummary = firstParsed.completionSummary
+    let retried = false
+
+    // RETRY when neither terminal tool fired. The model gave us field updates
+    // but no next question — without intervention the UI shows a fallback
+    // apology. Apply updates, rebuild the profile prefix with the fresh
+    // state, append a forcing reminder, retry once.
+    if (!assistantMessage && !isComplete) {
+      retried = true
+      const partialProfile = applyUpdates(profile, collectedUpdates)
+      const nudgedSummary = profileSummaryForPrompt(partialProfile)
+      const nudgedPrefix = `<current_profile_state>
+${nudgedSummary}
+</current_profile_state>
+
+The owner's transcript follows. [SYSTEM NOTE: your previous reply was missing a terminal tool call. Apply any remaining field updates, then call ask_clarifying_question or signal_intake_complete. The conversation can't progress without one of those.]`
+
+      const retryMessages: typeof apiMessages =
+        recent.length === 0
+          ? [{ role: 'user', content: nudgedPrefix + '\n\n(no messages yet — open the conversation)' }]
+          : [{ role: 'user', content: nudgedPrefix }, ...recent]
+
+      try {
+        const retryResponse = await callModel(retryMessages)
+        const retryParsed = parseAssistantResponse(retryResponse.content)
+        // Merge updates from both calls; prefer the retry's terminal tool.
+        collectedUpdates = [...collectedUpdates, ...retryParsed.updates]
+        assistantMessage = retryParsed.message
+        if (retryParsed.isComplete) {
           isComplete = true
-          const s = (tu.input as { summary?: string }).summary
-          if (typeof s === 'string') completionSummary = s
+          completionSummary = retryParsed.completionSummary
         }
-      } else if (block.type === 'text') {
-        // Model sometimes adds a small text comment alongside tool calls;
-        // use it as a fallback message if no ask_clarifying_question fired.
-        const tb = block as TextBlock
-        if (!assistantMessage && tb.text.trim()) assistantMessage = tb.text.trim()
+      } catch (err) {
+        console.error('intake/chat: retry failed', err)
+        // Fall through to the existing fallback below.
       }
     }
 
@@ -267,10 +354,13 @@ The owner's transcript follows.`
     }
 
     if (!assistantMessage) {
-      // Defensive: if the model returned nothing usable, prompt a retry
-      // rather than silently breaking the chat.
+      // Defensive: even the retry failed to produce a terminal call. Surface
+      // a friendly message so the UI isn't blank; the user can re-ask.
+      console.warn('intake/chat: both calls lacked terminal tool', {
+        firstHadUpdates: firstParsed.updates.length > 0,
+      })
       assistantMessage =
-        "Sorry, I lost my train of thought there. Could you say that again?"
+        "Hmm, I'm having trouble forming my next question — could you tell me a bit more about what your team does day to day?"
     }
 
     return NextResponse.json({
@@ -279,6 +369,7 @@ The owner's transcript follows.`
       updates: collectedUpdates,
       is_complete: isComplete,
       completion_summary: completionSummary,
+      retried,
     })
   } catch (err) {
     const message = err instanceof Error ? err.message : 'unknown error'
