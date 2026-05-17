@@ -1,13 +1,17 @@
 /**
  * Finalize the intake conversation.
  *
- * Creates:
- *   1. businesses row (replaces the old CreateBusinessView insert)
- *   2. business_profiles row (with the full structured profile + transcript)
- *   3. employees row for the owner (first employee, role "Owner")
+ * Idempotent — works whether or not the owner already has a business row.
+ * The dashboard's old signup flow (before this change) created the
+ * business at signup time; this endpoint detects an existing business
+ * for the auth user and UPDATEs it instead of inserting a new one.
  *
- * The caller is responsible for being authenticated as the owner.
- * We pull user_id from the auth cookie via @supabase/ssr.
+ * On every successful call:
+ *   1. businesses row exists for the owner (UPDATE if found, INSERT if not)
+ *   2. business_profiles row UPSERTed (one per business; intake_* timestamps
+ *      stamped depending on completed vs skipped)
+ *   3. owner appears as an active employee row with role 'Owner'
+ *      (only INSERTed if no Owner employee already exists for this business)
  */
 
 import { NextRequest, NextResponse } from 'next/server'
@@ -19,7 +23,7 @@ import crypto from 'node:crypto'
 type IntakeCompleteBody = {
   profile: BusinessProfileDraft
   transcript: ChatMessage[]
-  skipped?: boolean // owner clicked "skip" rather than completing the chat
+  skipped?: boolean
 }
 
 export async function POST(request: NextRequest) {
@@ -29,10 +33,7 @@ export async function POST(request: NextRequest) {
     const transcript = Array.isArray(body?.transcript) ? body.transcript : []
     const skipped = !!body?.skipped
 
-    // --- Auth: get the current user from cookies ---
-    // We mirror middleware's @supabase/ssr setup. This route is invoked from
-    // a client component on /team-onboarding, which is auth-gated by
-    // middleware — but we re-verify here so a malicious caller can't bypass.
+    // --- Auth ---
     const cookieStore = request.cookies
     const sessionClient = createServerClient(
       process.env.NEXT_PUBLIC_SUPABASE_URL!,
@@ -43,7 +44,7 @@ export async function POST(request: NextRequest) {
             return cookieStore.getAll()
           },
           setAll() {
-            // no-op; we don't need to mutate cookies in this route
+            // no-op
           },
         },
       }
@@ -56,13 +57,13 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ error: 'Not authenticated' }, { status: 401 })
     }
 
-    // --- Validate the minimum required fields ---
+    // --- Required fields ---
     const businessName = (profile.business_name || '').trim()
     if (!businessName) {
       return NextResponse.json(
         {
           error:
-            'Business name is required. The intake agent should have collected this, or the owner should type it manually.',
+            'Business name is required. The intake agent should have collected this — or the owner can type it manually before continuing.',
         },
         { status: 400 }
       )
@@ -75,31 +76,66 @@ export async function POST(request: NextRequest) {
       'Owner'
 
     const supabase = serverSupabase()
+    const industry = profile.industry ?? 'Other'
 
-    // --- 1. Create the business row ---
-    const { data: business, error: bizErr } = await supabase
+    // --- 1. Find or create the business ---
+    const { data: existingBiz, error: bizLookupErr } = await supabase
       .from('businesses')
-      .insert({
-        name: businessName,
-        industry: profile.industry ?? 'Other',
-        owner_id: user.id,
-      })
-      .select('id')
-      .single()
+      .select('id, name, industry')
+      .eq('owner_id', user.id)
+      .maybeSingle()
 
-    if (bizErr || !business) {
-      console.error('intake/complete: business insert failed', bizErr)
+    if (bizLookupErr) {
+      console.error('intake/complete: business lookup failed', bizLookupErr)
       return NextResponse.json(
-        { error: 'Failed to create business', detail: bizErr?.message },
+        { error: 'Failed to look up business', detail: bizLookupErr.message },
         { status: 500 }
       )
     }
 
-    // --- 2. Create the business_profile row ---
+    let businessId: string
+    if (existingBiz) {
+      // UPDATE name/industry if the intake collected different values —
+      // owner's latest answer wins.
+      const patch: Record<string, string> = {}
+      if (existingBiz.name !== businessName) patch.name = businessName
+      if (industry && existingBiz.industry !== industry) patch.industry = industry
+      if (Object.keys(patch).length > 0) {
+        const { error: updateErr } = await supabase
+          .from('businesses')
+          .update(patch)
+          .eq('id', existingBiz.id)
+        if (updateErr) {
+          console.error('intake/complete: business update failed (non-fatal)', updateErr)
+        }
+      }
+      businessId = existingBiz.id
+    } else {
+      const { data: created, error: bizErr } = await supabase
+        .from('businesses')
+        .insert({
+          name: businessName,
+          industry,
+          owner_id: user.id,
+        })
+        .select('id')
+        .single()
+      if (bizErr || !created) {
+        console.error('intake/complete: business insert failed', bizErr)
+        return NextResponse.json(
+          { error: 'Failed to create business', detail: bizErr?.message },
+          { status: 500 }
+        )
+      }
+      businessId = created.id
+    }
+
+    // --- 2. UPSERT business_profiles ---
     const profileRow = {
-      business_id: business.id,
+      business_id: businessId,
       intake_transcript: transcript,
-      [skipped ? 'intake_skipped_at' : 'intake_completed_at']: new Date().toISOString(),
+      intake_completed_at: skipped ? null : new Date().toISOString(),
+      intake_skipped_at: skipped ? new Date().toISOString() : null,
       industry: profile.industry ?? null,
       sub_industry: profile.sub_industry ?? null,
       size_band: profile.size_band ?? null,
@@ -114,34 +150,51 @@ export async function POST(request: NextRequest) {
 
     const { error: profileErr } = await supabase
       .from('business_profiles')
-      .insert(profileRow)
+      .upsert(profileRow, { onConflict: 'business_id', ignoreDuplicates: false })
 
-    // Non-fatal: business is usable even if profile insert hiccups. Owner
-    // can re-run intake from settings later. Log and continue.
+    // Non-fatal — business is usable either way. Owner can re-run intake later.
     if (profileErr) {
-      console.error('intake/complete: profile insert failed (non-fatal)', profileErr)
+      console.error('intake/complete: profile upsert failed (non-fatal)', profileErr)
     }
 
-    // --- 3. Add the owner as first employee ---
-    const { error: empErr } = await supabase.from('employees').insert({
-      business_id: business.id,
-      name: ownerName,
-      role: 'Owner',
-      email: user.email,
-      is_active: true,
-      install_token: crypto.randomUUID(),
-    })
+    // --- 3. Ensure owner appears as an employee (one Owner per business) ---
+    const { data: existingOwner } = await supabase
+      .from('employees')
+      .select('id, name, email')
+      .eq('business_id', businessId)
+      .eq('role', 'Owner')
+      .maybeSingle()
 
-    if (empErr) {
-      // Also non-fatal — they can add themselves from the team view.
-      console.error('intake/complete: owner employee insert failed (non-fatal)', empErr)
+    let ownerEmployeeSaved = true
+    if (!existingOwner) {
+      const { error: empErr } = await supabase.from('employees').insert({
+        business_id: businessId,
+        name: ownerName,
+        role: 'Owner',
+        email: user.email,
+        is_active: true,
+        install_token: crypto.randomUUID(),
+      })
+      if (empErr) {
+        console.error('intake/complete: owner employee insert failed (non-fatal)', empErr)
+        ownerEmployeeSaved = false
+      }
+    } else if (existingOwner.name !== ownerName || existingOwner.email !== user.email) {
+      // Patch name/email if they were collected freshly by intake.
+      const patch: Record<string, string | null | undefined> = {}
+      if (existingOwner.name !== ownerName) patch.name = ownerName
+      if (existingOwner.email !== user.email) patch.email = user.email
+      if (Object.keys(patch).length > 0) {
+        await supabase.from('employees').update(patch).eq('id', existingOwner.id)
+      }
     }
 
     return NextResponse.json({
-      business_id: business.id,
+      business_id: businessId,
       business_name: businessName,
       profile_saved: !profileErr,
-      owner_employee_saved: !empErr,
+      owner_employee_saved: ownerEmployeeSaved,
+      reused_existing_business: !!existingBiz,
     })
   } catch (err) {
     const message = err instanceof Error ? err.message : 'unknown error'

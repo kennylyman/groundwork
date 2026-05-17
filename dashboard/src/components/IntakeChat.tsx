@@ -223,7 +223,7 @@ export function IntakeChat({ onCompleted, initialOwnerName, ownerEmail }: Props)
               }}
               placeholder={thinking ? 'Wait for the response…' : 'Type your answer…'}
               disabled={thinking || completing}
-              className="flex-1 resize-none px-3 py-2 text-sm border border-gray-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-gray-900 focus:border-transparent disabled:bg-gray-50"
+              className="flex-1 resize-none px-3 py-2 text-sm text-gray-900 placeholder:text-gray-400 border border-gray-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-gray-900 focus:border-transparent disabled:bg-gray-50"
             />
             <button
               type="submit"

@@ -12,12 +12,13 @@
   --font-mono: var(--font-geist-mono);
 }
 
-@media (prefers-color-scheme: dark) {
-  :root {
-    --background: #0a0a0a;
-    --foreground: #ededed;
-  }
-}
+/* The dashboard is designed light-mode only — every page uses
+ * bg-gray-50 / bg-white and assumes near-black text. The Next.js
+ * scaffold's default prefers-color-scheme:dark block flipped --foreground
+ * to light grey, which cascaded into <input>/<textarea> elements that
+ * didn't set their own text color (light text on white inputs for any
+ * user with dark-mode OS). If we want real dark mode later, every page
+ * needs explicit dark variants — a much bigger change. */
 
 body {
   background: var(--background);

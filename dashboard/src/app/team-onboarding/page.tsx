@@ -51,6 +51,11 @@ export default function TeamOnboardingPage() {
   const router = useRouter()
   const [user, setUser] = useState<User | null>(null)
   const [business, setBusiness] = useState<Business | null>(null)
+  // intakeDone is true when business_profiles has either intake_completed_at
+  // or intake_skipped_at set for this business. Until then — even if a
+  // business row exists from the old signup flow — we route the owner
+  // through the IntakeChat so the profile actually gets filled in.
+  const [intakeDone, setIntakeDone] = useState(false)
   const [loading, setLoading] = useState(true)
 
   useEffect(() => {
@@ -58,9 +63,6 @@ export default function TeamOnboardingPage() {
   }, [])
 
   async function loadData() {
-    // Middleware already guarantees authentication for this route, but we
-    // re-fetch the user so the no-business form can use their id/email
-    // when creating the business + first employee.
     const {
       data: { user: u },
     } = await supabase.auth.getUser()
@@ -77,6 +79,21 @@ export default function TeamOnboardingPage() {
       .maybeSingle()
 
     setBusiness(biz ?? null)
+
+    // If we have a business, check whether intake has actually been finished.
+    // Either intake_completed_at OR intake_skipped_at counts as "done" —
+    // owner who clicked "Skip the rest" shouldn't be looped back to chat.
+    if (biz) {
+      const { data: profile } = await supabase
+        .from('business_profiles')
+        .select('intake_completed_at, intake_skipped_at')
+        .eq('business_id', biz.id)
+        .maybeSingle()
+      setIntakeDone(!!profile?.intake_completed_at || !!profile?.intake_skipped_at)
+    } else {
+      setIntakeDone(false)
+    }
+
     setLoading(false)
   }
 
@@ -88,12 +105,17 @@ export default function TeamOnboardingPage() {
     )
   }
 
+  const showIntake = !!user && !intakeDone
+
   return (
     <div className="min-h-screen bg-gray-50">
-      <Header showDashboardLink={!!business} onGoToDashboard={() => router.push('/')} />
+      <Header
+        showDashboardLink={intakeDone}
+        onGoToDashboard={() => router.push('/')}
+      />
 
-      <div className={`mx-auto px-8 py-12 ${business ? 'max-w-3xl' : 'max-w-6xl'}`}>
-        {!business && user && (
+      <div className={`mx-auto px-8 py-12 ${showIntake ? 'max-w-6xl' : 'max-w-3xl'}`}>
+        {showIntake && user && (
           <>
             <div className="mb-8">
               <h1 className="text-2xl font-semibold text-gray-900">
@@ -109,14 +131,15 @@ export default function TeamOnboardingPage() {
               initialOwnerName={(user.user_metadata?.full_name as string) || undefined}
               ownerEmail={user.email}
               onCompleted={() => {
-                // The complete endpoint already created the business row;
-                // re-fetch so the page transitions to the TeamView.
+                // The complete endpoint persisted (or updated) the business
+                // and stamped intake_completed_at. Re-fetch so the page
+                // flips to the TeamView.
                 void loadData()
               }}
             />
           </>
         )}
-        {business && <TeamView business={business} />}
+        {!showIntake && business && <TeamView business={business} />}
       </div>
     </div>
   )
@@ -290,13 +313,13 @@ function TeamView({ business }: { business: Business }) {
                 placeholder="Full name"
                 value={newEmployee.name}
                 onChange={(e) => setNewEmployee((n) => ({ ...n, name: e.target.value }))}
-                className="px-3 py-2 text-sm border border-gray-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-gray-900 bg-white"
+                className="px-3 py-2 text-sm text-gray-900 placeholder:text-gray-400 border border-gray-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-gray-900 bg-white"
                 autoFocus
               />
               <select
                 value={newEmployee.role}
                 onChange={(e) => setNewEmployee((n) => ({ ...n, role: e.target.value }))}
-                className="px-3 py-2 text-sm border border-gray-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-gray-900 bg-white"
+                className="px-3 py-2 text-sm text-gray-900 border border-gray-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-gray-900 bg-white"
               >
                 <option value="">Select role</option>
                 {ROLES.map((r) => (
@@ -312,7 +335,7 @@ function TeamView({ business }: { business: Business }) {
                 placeholder="Work email"
                 value={newEmployee.email}
                 onChange={(e) => setNewEmployee((n) => ({ ...n, email: e.target.value }))}
-                className="flex-1 px-3 py-2 text-sm border border-gray-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-gray-900 bg-white"
+                className="flex-1 px-3 py-2 text-sm text-gray-900 placeholder:text-gray-400 border border-gray-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-gray-900 bg-white"
               />
               <button
                 onClick={addEmployee}
