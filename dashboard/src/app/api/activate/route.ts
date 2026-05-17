@@ -73,6 +73,11 @@ export async function GET(request: NextRequest) {
   return NextResponse.json({
     employee_id: employee.id,
     business_id: employee.business_id,
+    // install_token is echoed back so the agent can persist it in
+    // config.json. transmit.py uses it as the auth header for
+    // POST /api/captures (the new server-side ingestion path that
+    // replaces the open anon-key insert).
+    install_token: token,
     anthropic_api_key: anthropicKey,
     supabase_url: supabaseUrl,
     supabase_anon_key: supabaseAnonKey,

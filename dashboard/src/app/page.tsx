@@ -2,13 +2,18 @@
 
 import { useEffect, useState } from 'react'
 import { supabase, Employee, Capture } from '@/lib/supabase'
-import { Activity, Users, Zap, TrendingUp, Clock, AlertCircle, FileText, Sparkles, Settings } from 'lucide-react'
+import { Activity, Users, Zap, TrendingUp, Clock, AlertCircle, FileText, Sparkles, Settings, WifiOff } from 'lucide-react'
 import { useRouter } from 'next/navigation'
 import Link from 'next/link'
 import { PauseToggle, PausedBadge } from '@/components/PauseToggle'
 import { OpportunitiesTable } from '@/components/OpportunitiesTable'
 import { ConnectionPrompts } from '@/components/ConnectionPrompts'
 import { WorkflowIntelligenceMap } from '@/components/WorkflowIntelligenceMap'
+import {
+  computeHeartbeatStatus,
+  ageLabel,
+  type HeartbeatStatus,
+} from '@/lib/agent-heartbeat'
 
 type EmployeeWithStatus = Employee & {
   latest_capture?: Capture
@@ -16,6 +21,8 @@ type EmployeeWithStatus = Employee & {
   high_automation_count: number
   status: 'active' | 'idle' | 'offline'
   has_unack_role_discovery: boolean
+  heartbeat_status: HeartbeatStatus
+  heartbeat_age: string
 }
 
 const AUTOMATION_COLORS: Record<string, string> = {
@@ -161,6 +168,20 @@ export default function Dashboard() {
           if (captureTime > fifteenMinutesAgo) status = 'active'
           else if (captureTime > sixtyMinutesAgo) status = 'idle'
         }
+        // Heartbeat status is a separate signal from `status` above. status
+        // = "did they have a capture in the last 60 min" (presence indicator).
+        // heartbeat_status = "is the agent process actually alive?" — uses
+        // both agent_version_updated_at and the latest capture timestamp,
+        // with business-hours gating. An employee at lunch on a weekday
+        // is "idle" but heartbeat_status = "active" (their agent is fine).
+        const heartbeat_status = computeHeartbeatStatus({
+          agent_version_updated_at: emp.agent_version_updated_at ?? null,
+          last_capture_at: latest?.captured_at ?? null,
+        })
+        const heartbeat_age = ageLabel({
+          agent_version_updated_at: emp.agent_version_updated_at ?? null,
+          last_capture_at: latest?.captured_at ?? null,
+        })
         return {
           ...emp,
           latest_capture: latest,
@@ -168,6 +189,8 @@ export default function Dashboard() {
           high_automation_count: highAutoCountByEmployee.get(emp.id) ?? 0,
           has_unack_role_discovery: unackSet.has(emp.id),
           status,
+          heartbeat_status,
+          heartbeat_age,
         }
       })
 
@@ -314,6 +337,21 @@ export default function Dashboard() {
                         <p className="text-sm font-medium text-gray-900 truncate">{emp.name}</p>
                         {emp.is_paused && <PausedBadge />}
                         {emp.has_unack_role_discovery && <RoleDiscoveryBadge />}
+                        {emp.heartbeat_status === 'warning' && (
+                          <HeartbeatBadge
+                            tone="amber"
+                            label="Agent quiet"
+                            tooltip={`Agent last checked in ${emp.heartbeat_age}. Expected during business hours.`}
+                          />
+                        )}
+                        {(emp.heartbeat_status === 'silent' ||
+                          emp.heartbeat_status === 'silent_long') && (
+                          <HeartbeatBadge
+                            tone="red"
+                            label="Agent silent"
+                            tooltip={`Agent has not checked in for ${emp.heartbeat_age}. May need re-install.`}
+                          />
+                        )}
                       </div>
                       <p className="text-xs text-gray-500">{emp.role || 'Admin'}</p>
                     </div>
@@ -406,6 +444,30 @@ function RoleDiscoveryBadge() {
     >
       <Sparkles className="w-2.5 h-2.5" />
       New role insight
+    </span>
+  )
+}
+
+function HeartbeatBadge({
+  tone,
+  label,
+  tooltip,
+}: {
+  tone: 'amber' | 'red'
+  label: string
+  tooltip: string
+}) {
+  const cls =
+    tone === 'red'
+      ? 'bg-red-50 text-red-700 border-red-200'
+      : 'bg-amber-50 text-amber-700 border-amber-200'
+  return (
+    <span
+      title={tooltip}
+      className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-medium border ${cls}`}
+    >
+      <WifiOff className="w-2.5 h-2.5" />
+      {label}
     </span>
   )
 }

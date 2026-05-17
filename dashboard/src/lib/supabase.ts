@@ -52,6 +52,8 @@ export type Employee = {
   is_paused: boolean
   invite_sent_at?: string | null
   created_at: string
+  agent_version?: string | null
+  agent_version_updated_at?: string | null
 }
 
 export type Capture = {

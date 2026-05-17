@@ -16,6 +16,10 @@
     {
       "path": "/api/integrations/enrich-captures",
       "schedule": "0 4 * * *"
+    },
+    {
+      "path": "/api/heartbeat-digest",
+      "schedule": "30 13 * * *"
     }
   ]
 }
