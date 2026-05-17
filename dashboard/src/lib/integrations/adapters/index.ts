@@ -12,12 +12,13 @@
 
 import type { ToolAdapter } from './types'
 import { slackAdapter } from './slack'
+import { microsoft365Adapter } from './microsoft365'
 import {
   NATIVE_TOOL_MANIFEST,
   nativeToolManifestNames,
 } from './manifest'
 
-const ADAPTERS: ToolAdapter[] = [slackAdapter]
+const ADAPTERS: ToolAdapter[] = [slackAdapter, microsoft365Adapter]
 
 // Fail loud at module load if the manifest and the registry drift apart.
 // Better to crash the server boot than serve a UI that promises

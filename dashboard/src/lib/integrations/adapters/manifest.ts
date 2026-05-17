@@ -28,6 +28,7 @@ export type NativeToolManifestEntry = {
 
 export const NATIVE_TOOL_MANIFEST: NativeToolManifestEntry[] = [
   { toolName: 'slack', label: 'Slack' },
+  { toolName: 'microsoft-365', label: 'Microsoft 365' },
 ]
 
 export function nativeToolManifestNames(): string[] {

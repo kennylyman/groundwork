@@ -2,25 +2,51 @@
  * Tool-call runtime.
  *
  * Single public entry point — callTool(businessId, toolName, operation, args).
- * Resolves the integration row, decrypts the stored token, dispatches to
- * the adapter's named operation, and returns the result.
+ * Resolves the integration row, decrypts the stored token, refreshes it
+ * if expired, dispatches to the adapter's named operation, and returns
+ * the result.
  *
  * Everywhere in the product that wants to read or write to a customer's
  * connected tool goes through this. Phase 5 automation execution is just
  * a series of callTool calls inside an agent loop. Capture enrichment is
  * a callTool wrapper too.
  *
- * Errors are surfaced verbatim — the caller decides whether to retry,
- * log to capture_enrichments with an error key, or escalate.
+ * Just-in-time token refresh:
+ *   Microsoft 365 access tokens expire in ~1 hour. HubSpot is similar.
+ *   The daily refresh cron is too slow to keep these usable — by hour 2
+ *   the access token is dead. So every callTool checks token_expires_at
+ *   before invoking the operation; if it's within REFRESH_SAFETY_MS of
+ *   expiry, we refresh inline first.
+ *
+ *   This also means the daily refresh cron isn't strictly necessary for
+ *   correctness — JIT covers any operation that's actually called.
+ *   The cron still has value as a safety net for tokens that are about
+ *   to lose their refresh-token validity (e.g., Microsoft's refresh
+ *   token rotates every refresh, so we want to keep it fresh even when
+ *   nobody's calling the integration).
  */
 
 import { serverSupabase } from './supabase'
-import { decryptToken } from './integrations/crypto'
-import { getAdapter, type ToolCallContext } from './integrations/adapters'
+import { decryptToken, encryptToken } from './integrations/crypto'
+import {
+  getAdapter,
+  type ToolAdapter,
+  type ToolCallContext,
+} from './integrations/adapters'
 
 export type CallToolResult<T = unknown> =
   | { ok: true; result: T }
-  | { ok: false; error: string; code: 'not_connected' | 'no_adapter' | 'no_operation' | 'token_decrypt_failed' | 'operation_failed' }
+  | {
+      ok: false
+      error: string
+      code:
+        | 'not_connected'
+        | 'no_adapter'
+        | 'no_operation'
+        | 'token_decrypt_failed'
+        | 'token_refresh_failed'
+        | 'operation_failed'
+    }
 
 type IntegrationRow = {
   id: string
@@ -34,6 +60,11 @@ type IntegrationRow = {
   external_account_id: string | null
   external_account_label: string | null
 }
+
+/** If token expires within this window, refresh before using. 5 minutes
+ *  gives us enough margin to survive clock skew + the operation's own
+ *  duration without the access token dying mid-call. */
+const REFRESH_SAFETY_MS = 5 * 60 * 1000
 
 async function loadIntegration(
   businessId: string,
@@ -54,6 +85,106 @@ async function loadIntegration(
     .limit(1)
     .maybeSingle()
   return data as IntegrationRow | null
+}
+
+function tokenIsStale(row: IntegrationRow): boolean {
+  if (!row.token_expires_at) return false // null = never expires
+  const expiresAt = new Date(row.token_expires_at).getTime()
+  return expiresAt - Date.now() <= REFRESH_SAFETY_MS
+}
+
+/** Refresh the stored token via the adapter and persist the new values.
+ *  Returns the freshly-decrypted access token + scopes on success.
+ *  Throws on any failure — caller decides whether to swallow or surface. */
+async function refreshTokenInline(
+  row: IntegrationRow,
+  adapter: ToolAdapter
+): Promise<{
+  accessToken: string
+  scopes: string[]
+  externalAccountId: string | null
+  externalAccountLabel: string | null
+}> {
+  if (!adapter.oauth.refresh) {
+    throw new Error('adapter has no refresh method')
+  }
+  if (!row.refresh_token_encrypted) {
+    throw new Error('integration has no refresh token stored')
+  }
+  const refreshToken = decryptToken(row.refresh_token_encrypted)
+  if (!refreshToken) {
+    throw new Error('refresh token decrypted to empty')
+  }
+
+  const next = await adapter.oauth.refresh(refreshToken)
+
+  const supabase = serverSupabase()
+  const { error } = await supabase
+    .from('integrations')
+    .update({
+      access_token_encrypted: encryptToken(next.accessToken),
+      refresh_token_encrypted: next.refreshToken
+        ? encryptToken(next.refreshToken)
+        : row.refresh_token_encrypted,
+      token_scopes: next.scopes.length ? next.scopes : row.token_scopes,
+      token_expires_at: next.expiresAt ? next.expiresAt.toISOString() : null,
+      // A successful refresh restores 'connected' if a prior failure
+      // marked us 'error'.
+      status: 'connected',
+    })
+    .eq('id', row.id)
+  if (error) {
+    // The refresh succeeded but we couldn't persist — the new tokens are
+    // already valid at the provider, so use them for this request and
+    // accept that the next call will refresh again.
+    console.error('refreshTokenInline: persist failed', error)
+  }
+
+  return {
+    accessToken: next.accessToken,
+    scopes: next.scopes.length ? next.scopes : row.token_scopes ?? [],
+    externalAccountId: next.externalAccountId ?? row.external_account_id,
+    externalAccountLabel: next.externalAccountLabel ?? row.external_account_label,
+  }
+}
+
+/** Build a ToolCallContext from an integration row, refreshing the token
+ *  inline if it's stale. Shared between callTool and the enrich-captures
+ *  cron so both get the same refresh behavior.
+ *
+ *  Exported so the enrichment cron can use it without going through the
+ *  callTool dispatch layer (it has its own loop over captures). */
+export async function buildContextWithRefresh(
+  row: IntegrationRow,
+  adapter: ToolAdapter
+): Promise<ToolCallContext> {
+  let accessToken: string | null
+  let scopes = row.token_scopes ?? []
+  let externalAccountId = row.external_account_id
+  let externalAccountLabel = row.external_account_label
+
+  if (tokenIsStale(row) && adapter.oauth.refresh && row.refresh_token_encrypted) {
+    const refreshed = await refreshTokenInline(row, adapter)
+    accessToken = refreshed.accessToken
+    scopes = refreshed.scopes
+    externalAccountId = refreshed.externalAccountId
+    externalAccountLabel = refreshed.externalAccountLabel
+  } else {
+    accessToken = decryptToken(row.access_token_encrypted)
+  }
+
+  if (!accessToken) {
+    throw new Error('no usable access token')
+  }
+
+  return {
+    businessId: row.id, // overwritten below if caller wants the real business id
+    toolName: row.tool_name,
+    accessToken,
+    externalAccountId,
+    externalAccountLabel,
+    scopes,
+  }
 }
 
 export async function callTool<T = unknown>(
@@ -84,32 +215,34 @@ export async function callTool<T = unknown>(
     }
   }
 
-  let accessToken: string | null
+  // Build the context, refreshing inline if the access token is stale.
+  let ctx: ToolCallContext
   try {
-    accessToken = decryptToken(integration.access_token_encrypted)
+    const built = await buildContextWithRefresh(integration, adapter)
+    ctx = { ...built, businessId }
   } catch (err) {
-    console.error('callTool: token decrypt failed', { businessId, toolName, err })
+    const message = err instanceof Error ? err.message : 'unknown'
+    if (/refresh/i.test(message) || /no refresh token/i.test(message)) {
+      console.error('callTool: refresh failed', { businessId, toolName, err: message })
+      // Mark the row 'error' so the UI knows to prompt a re-auth, but
+      // don't blank the access token — it may still work for a bit.
+      const supabase = serverSupabase()
+      await supabase
+        .from('integrations')
+        .update({ status: 'error' })
+        .eq('id', integration.id)
+      return {
+        ok: false,
+        error: `token refresh failed: ${message}`,
+        code: 'token_refresh_failed',
+      }
+    }
+    console.error('callTool: context build failed', { businessId, toolName, err: message })
     return {
       ok: false,
-      error: 'failed to decrypt stored token',
+      error: message,
       code: 'token_decrypt_failed',
     }
-  }
-  if (!accessToken) {
-    return {
-      ok: false,
-      error: 'stored token decrypted to empty string',
-      code: 'token_decrypt_failed',
-    }
-  }
-
-  const ctx: ToolCallContext = {
-    businessId,
-    toolName,
-    accessToken,
-    externalAccountId: integration.external_account_id,
-    externalAccountLabel: integration.external_account_label,
-    scopes: integration.token_scopes ?? [],
   }
 
   const startedAt = Date.now()

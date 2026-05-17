@@ -111,6 +111,32 @@ export const TOOL_REGISTRY: ToolDefinition[] = [
     ring2Available: true,
     ring3Available: true,
   },
+  // Microsoft 365 is the unified-OAuth registry entry — one connection
+  // covers Outlook (email + calendar), Teams (chat + meetings),
+  // SharePoint (files), and OneDrive. We deliberately leave detect
+  // patterns empty here so normalizeToolName keeps mapping captures to
+  // the granular tools above (outlook / teams). The native adapter's
+  // matchesCapture() does its own M365-surface detection across all
+  // four products and pulls enrichment from Microsoft Graph regardless
+  // of which surface the capture lands on.
+  {
+    id: 'microsoft-365',
+    label: 'Microsoft 365',
+    category: 'productivity',
+    capabilities: [
+      'communication.send.email',
+      'communication.triage.inbox',
+      'communication.send.chat',
+      'meeting.attend',
+      'meeting.followup',
+      'workflow.schedule',
+      'document.create',
+      'document.review',
+    ],
+    detect: { windowSubstrings: [], urlSubstrings: [] },
+    ring2Available: true,
+    ring3Available: true,
+  },
   {
     id: 'slack',
     label: 'Slack',

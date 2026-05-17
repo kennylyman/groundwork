@@ -19,12 +19,9 @@
  */
 import { NextRequest, NextResponse } from 'next/server'
 import { serverSupabase } from '@/lib/supabase'
-import { decryptToken } from '@/lib/integrations/crypto'
 import { getAdapter, listAdapters } from '@/lib/integrations/adapters'
-import type {
-  CaptureForEnrichment,
-  ToolCallContext,
-} from '@/lib/integrations/adapters/types'
+import { buildContextWithRefresh } from '@/lib/integrations-runtime'
+import type { CaptureForEnrichment } from '@/lib/integrations/adapters/types'
 
 export const maxDuration = 60
 
@@ -44,7 +41,9 @@ type IntegrationRow = {
   business_id: string
   tool_name: string
   access_token_encrypted: string | null
+  refresh_token_encrypted: string | null
   token_scopes: string[] | null
+  token_expires_at: string | null
   external_account_id: string | null
   external_account_label: string | null
 }
@@ -63,7 +62,7 @@ async function handle(req: NextRequest) {
   const { data: integrations, error: intErr } = await supabase
     .from('integrations')
     .select(
-      'id, business_id, tool_name, access_token_encrypted, token_scopes, external_account_id, external_account_label'
+      'id, business_id, tool_name, access_token_encrypted, refresh_token_encrypted, token_scopes, token_expires_at, external_account_id, external_account_label'
     )
     .eq('ring', 3)
     .eq('status', 'connected')
@@ -133,35 +132,34 @@ async function handle(req: NextRequest) {
       continue
     }
 
-    let accessToken: string | null
+    // Build the context with JIT refresh — if the stored access token is
+    // stale (within 5 min of expiry), this swaps in a refreshed one and
+    // persists it. Critical for Microsoft 365 / HubSpot where the access
+    // token only lives ~1 hour and the daily refresh cron is too slow.
+    let ctx
     try {
-      accessToken = decryptToken(chosenAdapterRow.access_token_encrypted)
+      const built = await buildContextWithRefresh(
+        {
+          ...chosenAdapterRow,
+          ring: 3,
+          status: 'connected',
+        },
+        chosenAdapter
+      )
+      ctx = { ...built, businessId: cap.business_id }
     } catch (e) {
       const msg = e instanceof Error ? e.message : 'unknown'
-      errors.push(`${cap.id}: decrypt failed`)
+      errors.push(`${cap.id}: ${msg}`)
       await supabase
         .from('captures')
         .update({
           capture_enrichments: {
-            [chosenAdapter.toolName]: { error: 'decrypt_failed' },
+            [chosenAdapter.toolName]: { error: `auth: ${msg}` },
           },
         })
         .eq('id', cap.id)
-      console.error('enrich-captures: decrypt', msg)
+      console.error('enrich-captures: auth', msg)
       continue
-    }
-    if (!accessToken) {
-      skipped += 1
-      continue
-    }
-
-    const ctx: ToolCallContext = {
-      businessId: cap.business_id,
-      toolName: chosenAdapter.toolName,
-      accessToken,
-      externalAccountId: chosenAdapterRow.external_account_id,
-      externalAccountLabel: chosenAdapterRow.external_account_label,
-      scopes: chosenAdapterRow.token_scopes ?? [],
     }
 
     // We checked chosenAdapter.enrichCapture exists in the selection loop
