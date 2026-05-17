@@ -13,6 +13,7 @@
 import { NextRequest, NextResponse } from 'next/server'
 import Anthropic from '@anthropic-ai/sdk'
 import type { ChatMessage, BusinessProfileDraft } from '@/lib/intake-types'
+import { resolveUser } from '@/lib/auth'
 
 export const maxDuration = 30
 
@@ -245,6 +246,14 @@ function parseAssistantResponse(
 
 export async function POST(request: NextRequest) {
   try {
+    // Auth: caller must be signed in. Intake runs during onboarding before
+    // a business row exists, so we only check the user — not ownership of
+    // a business — and rely on /api/intake/complete for ownership checks.
+    const user = await resolveUser(request)
+    if (!user) {
+      return NextResponse.json({ error: 'Not authenticated' }, { status: 401 })
+    }
+
     const body = await request.json()
     const messages: ChatMessage[] = Array.isArray(body?.messages) ? body.messages : []
     const profile: BusinessProfileDraft = body?.profile && typeof body.profile === 'object' ? body.profile : {}

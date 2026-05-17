@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server'
 import Anthropic from '@anthropic-ai/sdk'
 import { serverSupabase } from '@/lib/supabase'
+import { resolveEmployeeOwner } from '@/lib/auth'
 
 export const maxDuration = 60
 
@@ -99,6 +100,13 @@ export async function POST(request: NextRequest) {
     }
     if (typeof category !== 'string' || !category) {
       return NextResponse.json({ error: 'category (string) required' }, { status: 400 })
+    }
+
+    // Auth: caller must own the employee's business. Blocks anonymous abuse
+    // of the Anthropic budget against arbitrary employee_ids.
+    const ctx = await resolveEmployeeOwner(request, employeeId)
+    if (!ctx) {
+      return NextResponse.json({ error: 'Not authorized' }, { status: 401 })
     }
 
     const apiKey = process.env.ANTHROPIC_API_KEY

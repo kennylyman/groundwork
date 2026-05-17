@@ -3,6 +3,7 @@ import mss.tools
 import base64
 import time
 import threading
+from datetime import datetime, timezone
 from PIL import Image
 import io
 import subprocess
@@ -157,7 +158,11 @@ def build_context_snapshot(previous_tasks=None):
     idle = get_idle_seconds()
     
     snapshot = {
-        "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S"),
+        # UTC with Z suffix. Supabase's captured_at column is timestamptz —
+        # without the Z it would be parsed as local time on whichever machine
+        # PostgREST runs on, which silently skews Role Discovery's
+        # "mornings vs afternoons" rollups for every employee.
+        "timestamp": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
         "screenshot_b64": capture_screenshot(),
         "active_window": get_active_window(),
         "active_url": get_active_url(),

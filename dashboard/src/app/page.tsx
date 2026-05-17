@@ -87,56 +87,88 @@ export default function Dashboard() {
       const fifteenMinutesAgo = new Date(now.getTime() - 15 * 60 * 1000).toISOString()
       const sixtyMinutesAgo = new Date(now.getTime() - 60 * 60 * 1000).toISOString()
 
-      // Single query for unacknowledged role discoveries so each row doesn't
-      // need its own round trip.
       const employeeIds = employeeList.map((e) => e.id)
-      const { data: unackProfiles } = await supabase
-        .from('employee_role_profiles')
-        .select('employee_id')
-        .in('employee_id', employeeIds)
-        .is('acknowledged_at', null)
-      const unackSet = new Set((unackProfiles ?? []).map((p) => p.employee_id))
 
-      const enriched: EmployeeWithStatus[] = await Promise.all(
-        employeeList.map(async (emp) => {
-          const { data: latest } = await supabase
+      // ----- Bulk reads, no N+1 ------------------------------------------
+      // Before: 3 queries × N employees + 1 unack query = 3N+1 round trips.
+      // After: 4 bulk reads, regardless of team size.
+
+      // 1. Unacknowledged role discoveries — already bulk in earlier pass.
+      // 2. Most-recent capture per employee — fetch within the activity
+      //    window (60min) since that's the longest "latest" we render. If
+      //    nothing fell in that window, the employee is "offline" anyway
+      //    and we don't need the capture's content. Group by employee_id
+      //    in memory to keep the latest.
+      // 3. Today's captures (light columns: employee_id, automation_potential)
+      //    — counted client-side per employee.
+
+      const [{ data: unackProfiles }, { data: recentCaptures }, { data: todaysCaptures }] =
+        await Promise.all([
+          supabase
+            .from('employee_role_profiles')
+            .select('employee_id')
+            .in('employee_id', employeeIds)
+            .is('acknowledged_at', null),
+          supabase
             .from('captures')
             .select('*')
-            .eq('employee_id', emp.id)
-            .order('captured_at', { ascending: false })
-            .limit(1)
-            .single()
-
-          const { count: todayCount } = await supabase
+            .in('employee_id', employeeIds)
+            .gte('captured_at', sixtyMinutesAgo)
+            .order('captured_at', { ascending: false }),
+          supabase
             .from('captures')
-            .select('*', { count: 'exact', head: true })
-            .eq('employee_id', emp.id)
-            .gte('captured_at', todayStart)
+            .select('employee_id, automation_potential')
+            .in('employee_id', employeeIds)
+            .gte('captured_at', todayStart),
+        ])
 
-          const { count: highAutoCount } = await supabase
-            .from('captures')
-            .select('*', { count: 'exact', head: true })
-            .eq('employee_id', emp.id)
-            .eq('automation_potential', 'high')
-            .gte('captured_at', todayStart)
+      const unackSet = new Set((unackProfiles ?? []).map((p) => p.employee_id))
 
-          let status: 'active' | 'idle' | 'offline' = 'offline'
-          if (latest) {
-            const captureTime = new Date(latest.captured_at).toISOString()
-            if (captureTime > fifteenMinutesAgo) status = 'active'
-            else if (captureTime > sixtyMinutesAgo) status = 'idle'
-          }
+      // Group recent captures by employee, keep only the freshest (the query
+      // is already ordered desc, so first hit wins).
+      const latestByEmployee = new Map<string, Capture>()
+      for (const cap of (recentCaptures ?? []) as Capture[]) {
+        if (!latestByEmployee.has(cap.employee_id)) {
+          latestByEmployee.set(cap.employee_id, cap)
+        }
+      }
 
-          return {
-            ...emp,
-            latest_capture: latest || undefined,
-            today_captures: todayCount || 0,
-            high_automation_count: highAutoCount || 0,
-            has_unack_role_discovery: unackSet.has(emp.id),
-            status,
-          }
-        })
-      )
+      // Count today's captures per employee in a single pass.
+      const todayCountByEmployee = new Map<string, number>()
+      const highAutoCountByEmployee = new Map<string, number>()
+      for (const cap of (todaysCaptures ?? []) as Pick<
+        Capture,
+        'employee_id' | 'automation_potential'
+      >[]) {
+        todayCountByEmployee.set(
+          cap.employee_id,
+          (todayCountByEmployee.get(cap.employee_id) ?? 0) + 1
+        )
+        if (cap.automation_potential === 'high') {
+          highAutoCountByEmployee.set(
+            cap.employee_id,
+            (highAutoCountByEmployee.get(cap.employee_id) ?? 0) + 1
+          )
+        }
+      }
+
+      const enriched: EmployeeWithStatus[] = employeeList.map((emp) => {
+        const latest = latestByEmployee.get(emp.id)
+        let status: 'active' | 'idle' | 'offline' = 'offline'
+        if (latest) {
+          const captureTime = new Date(latest.captured_at).toISOString()
+          if (captureTime > fifteenMinutesAgo) status = 'active'
+          else if (captureTime > sixtyMinutesAgo) status = 'idle'
+        }
+        return {
+          ...emp,
+          latest_capture: latest,
+          today_captures: todayCountByEmployee.get(emp.id) ?? 0,
+          high_automation_count: highAutoCountByEmployee.get(emp.id) ?? 0,
+          has_unack_role_discovery: unackSet.has(emp.id),
+          status,
+        }
+      })
 
       setEmployees(enriched)
 

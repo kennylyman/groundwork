@@ -1,9 +1,21 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { serverSupabase } from '@/lib/supabase'
+import { resolveEmployeeOwner } from '@/lib/auth'
 
 export async function POST(request: NextRequest) {
   try {
     const { employeeId } = await request.json()
+    if (typeof employeeId !== 'string' || !employeeId) {
+      return NextResponse.json({ error: 'employeeId required' }, { status: 400 })
+    }
+
+    // Caller must own the business the employee belongs to. This blocks an
+    // unauthenticated attacker from triggering invite emails to any employee.
+    const ctx = await resolveEmployeeOwner(request, employeeId)
+    if (!ctx) {
+      return NextResponse.json({ error: 'Not authorized' }, { status: 401 })
+    }
+
     const supabase = serverSupabase()
 
     const { data: employee, error: empError } = await supabase

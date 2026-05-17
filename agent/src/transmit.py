@@ -1,9 +1,16 @@
 import os
 import json
-import time
+from datetime import datetime, timezone
 from pathlib import Path
 
 import requests
+
+
+def _utc_iso() -> str:
+    """UTC ISO 8601 with Z suffix. Use for all timestamps that land in
+    Supabase timestamptz columns so they're unambiguous regardless of the
+    agent host's local timezone."""
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 QUEUE_FILE = Path(os.environ.get('APPDATA', '.')) / 'Groundwork' / 'transmit_queue.json'
 
@@ -18,8 +25,6 @@ def _headers(supabase_anon_key: str) -> dict:
 
 
 def _build_payload(snapshot: dict, classification: dict, session_id: str, config: dict) -> dict:
-    raw = {k: v for k, v in snapshot.items() if k != "screenshot_b64"}
-    raw.update(classification)
     idle_seconds = snapshot.get("idle_seconds", 0)
     return {
         "employee_id": config["employee_id"],
@@ -35,7 +40,6 @@ def _build_payload(snapshot: dict, classification: dict, session_id: str, config
         "workflow_step": classification.get("workflow_step"),
         "trigger": classification.get("trigger"),
         "reasoning": classification.get("reasoning"),
-        "flags": classification.get("flags", []),
         "capabilities": classification.get("capabilities", []),
         "active_window": snapshot.get("active_window"),
         "active_url": snapshot.get("active_url"),
@@ -44,7 +48,9 @@ def _build_payload(snapshot: dict, classification: dict, session_id: str, config
         "copy_paste_events": snapshot.get("copy_paste_events_last_90s", 0),
         "idle_seconds": idle_seconds,
         "is_idle": idle_seconds > 60,
-        "raw_json": raw,
+        # raw_json + flags columns were dropped in migration 0009; the
+        # classifier's `flags` output stays in the local result dict for
+        # logging (see classify.print_classification) but isn't sent.
     }
 
 
@@ -83,7 +89,7 @@ def _queue_locally(payload: dict) -> None:
             queue = json.loads(QUEUE_FILE.read_text())
         queue.append({
             "payload": payload,
-            "queued_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
+            "queued_at": _utc_iso(),
             "retry_count": 0,
         })
         QUEUE_FILE.write_text(json.dumps(queue, indent=2))
@@ -171,7 +177,7 @@ def end_session(session_id: str, total_captures: int, config: dict) -> None:
             json={
                 "status": "completed",
                 "total_captures": total_captures,
-                "ended_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
+                "ended_at": _utc_iso(),
             },
             timeout=10,
         )

@@ -28,7 +28,7 @@ a = Analysis(
         'win32gui',
         'win32process',
         'win32con',
-        'pywinauto',
+        # pywinauto removed — only capture_windows.py used it, which is gone.
         'tkinter',
         'tkinter.ttk',
     ],

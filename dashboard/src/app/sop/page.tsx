@@ -1,9 +1,7 @@
 'use client'
 
 import { useEffect, useState } from 'react'
-import Link from 'next/link'
 import {
-  ArrowLeft,
   FileText,
   Copy,
   Download,
@@ -12,6 +10,7 @@ import {
   AlertCircle,
   TrendingUp,
 } from 'lucide-react'
+import { DashboardNav } from '@/components/DashboardNav'
 import { supabase, Employee } from '@/lib/supabase'
 import {
   SopDocument,
@@ -139,25 +138,7 @@ export default function SopBuilderPage() {
 
   return (
     <div className="min-h-screen bg-gray-50">
-      {/* Top nav — hidden in print */}
-      <div className="bg-white border-b border-gray-200 px-8 py-4 print:hidden">
-        <div className="max-w-5xl mx-auto flex items-center justify-between">
-          <div className="flex items-center gap-4">
-            <Link
-              href="/"
-              className="flex items-center gap-2 text-gray-400 hover:text-gray-600 transition-colors"
-            >
-              <ArrowLeft className="w-4 h-4" />
-              <span className="text-sm">Back</span>
-            </Link>
-            <div className="w-px h-4 bg-gray-200" />
-            <div className="flex items-center gap-2">
-              <FileText className="w-4 h-4 text-gray-600" />
-              <h1 className="text-sm font-semibold text-gray-900">SOP Builder</h1>
-            </div>
-          </div>
-        </div>
-      </div>
+      <DashboardNav title="SOP Builder" />
 
       <div className="max-w-5xl mx-auto px-8 py-8 pb-32">
         {/* Generation card — hidden in print */}

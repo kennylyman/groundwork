@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server'
 import Anthropic from '@anthropic-ai/sdk'
 import { serverSupabase } from '@/lib/supabase'
+import { resolveEmployeeOwner } from '@/lib/auth'
 
 // Long-running LLM call. Default Vercel serverless timeout is 10s on Hobby;
 // 60s should comfortably fit a sonnet generation.
@@ -63,6 +64,12 @@ export async function POST(request: NextRequest) {
     }
     if (typeof category !== 'string' || !category) {
       return NextResponse.json({ error: 'category (string) required' }, { status: 400 })
+    }
+
+    // Auth: caller must own the employee's business.
+    const ctx = await resolveEmployeeOwner(request, employeeId)
+    if (!ctx) {
+      return NextResponse.json({ error: 'Not authorized' }, { status: 401 })
     }
 
     const apiKey = process.env.ANTHROPIC_API_KEY

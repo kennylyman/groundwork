@@ -2,11 +2,11 @@
 
 import { useEffect, useState } from 'react'
 import { supabase, Employee, Capture } from '@/lib/supabase'
-import { ArrowLeft, Zap, Clock, Activity, TrendingUp } from 'lucide-react'
-import Link from 'next/link'
+import { Zap, Clock, Activity, TrendingUp } from 'lucide-react'
 import { use } from 'react'
 import { PauseToggle, PausedBadge } from '@/components/PauseToggle'
 import { RoleDiscoveryCard, type RoleProfile } from '@/components/RoleDiscoveryCard'
+import { DashboardNav } from '@/components/DashboardNav'
 
 const AUTOMATION_COLORS: Record<string, string> = {
   high: 'text-red-500 bg-red-50 border-red-100',
@@ -88,26 +88,21 @@ export default function EmployeePage({ params }: { params: Promise<{ id: string 
 
   return (
     <div className="min-h-screen bg-gray-50">
-      {/* Header */}
+      <DashboardNav />
+
+      {/* Page-specific subheader: avatar + name + pause toggle */}
       <div className="bg-white border-b border-gray-200 px-8 py-4">
         <div className="max-w-7xl mx-auto flex items-center justify-between">
-          <div className="flex items-center gap-4">
-            <Link href="/" className="flex items-center gap-2 text-gray-400 hover:text-gray-600 transition-colors">
-              <ArrowLeft className="w-4 h-4" />
-              <span className="text-sm">Back</span>
-            </Link>
-            <div className="w-px h-4 bg-gray-200" />
-            <div className="flex items-center gap-3">
-              <div className="w-8 h-8 bg-gray-900 rounded-full flex items-center justify-center text-xs font-medium text-white">
-                {employee?.name.split(' ').map(n => n[0]).join('').slice(0, 2)}
+          <div className="flex items-center gap-3">
+            <div className="w-8 h-8 bg-gray-900 rounded-full flex items-center justify-center text-xs font-medium text-white">
+              {employee?.name.split(' ').map(n => n[0]).join('').slice(0, 2)}
+            </div>
+            <div>
+              <div className="flex items-center gap-2">
+                <h1 className="text-sm font-semibold text-gray-900">{employee?.name}</h1>
+                {employee?.is_paused && <PausedBadge />}
               </div>
-              <div>
-                <div className="flex items-center gap-2">
-                  <h1 className="text-sm font-semibold text-gray-900">{employee?.name}</h1>
-                  {employee?.is_paused && <PausedBadge />}
-                </div>
-                <p className="text-xs text-gray-500">{employee?.role || 'Admin'} · Today</p>
-              </div>
+              <p className="text-xs text-gray-500">{employee?.role || 'Admin'} · Today</p>
             </div>
           </div>
           {employee && (

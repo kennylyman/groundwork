@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { serverSupabase } from '@/lib/supabase'
+import { resolveEmployeeOwner } from '@/lib/auth'
 
 export async function POST(request: NextRequest) {
   try {
@@ -12,6 +13,12 @@ export async function POST(request: NextRequest) {
     }
     if (typeof paused !== 'boolean') {
       return NextResponse.json({ error: 'paused (boolean) required' }, { status: 400 })
+    }
+
+    // Caller must be the owner of the business the employee belongs to.
+    const ctx = await resolveEmployeeOwner(request, employeeId)
+    if (!ctx) {
+      return NextResponse.json({ error: 'Not authorized' }, { status: 401 })
     }
 
     const { error } = await serverSupabase()
