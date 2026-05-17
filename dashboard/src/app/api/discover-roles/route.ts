@@ -23,6 +23,7 @@
 import { NextRequest, NextResponse } from 'next/server'
 import Anthropic from '@anthropic-ai/sdk'
 import { serverSupabase } from '@/lib/supabase'
+import { checkRateLimit } from '@/lib/rate-limit'
 
 export const maxDuration = 60
 
@@ -356,6 +357,15 @@ async function handle(req: NextRequest) {
         if (!check.should) {
           skipped += 1
           skippedReasons[check.reason] = (skippedReasons[check.reason] || 0) + 1
+          continue
+        }
+        // Rate limit per business — 10/min. The cron processes up to one
+        // employee per business per run before hitting the limit; daily
+        // cadence means typical businesses stay well under it.
+        const rl = await checkRateLimit(`business:${emp.business_id}`)
+        if (!rl.success) {
+          skipped += 1
+          skippedReasons['rate-limited'] = (skippedReasons['rate-limited'] || 0) + 1
           continue
         }
         const result = await discoverForEmployee(supabase, client, emp)

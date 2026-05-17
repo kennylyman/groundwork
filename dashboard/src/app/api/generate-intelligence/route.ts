@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server'
 import Anthropic from '@anthropic-ai/sdk'
 import { serverSupabase } from '@/lib/supabase'
 import { resolveEmployeeOwner } from '@/lib/auth'
+import { checkRateLimit } from '@/lib/rate-limit'
 
 export const maxDuration = 60
 
@@ -107,6 +108,15 @@ export async function POST(request: NextRequest) {
     const ctx = await resolveEmployeeOwner(request, employeeId)
     if (!ctx) {
       return NextResponse.json({ error: 'Not authorized' }, { status: 401 })
+    }
+
+    // Rate limit per business — 10/min on LLM routes.
+    const rl = await checkRateLimit(`business:${ctx.business.id}`)
+    if (!rl.success) {
+      return NextResponse.json(
+        { error: 'Rate limit exceeded — try again in a minute' },
+        { status: 429, headers: { 'Retry-After': '60' } }
+      )
     }
 
     const apiKey = process.env.ANTHROPIC_API_KEY

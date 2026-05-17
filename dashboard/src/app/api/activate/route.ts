@@ -61,6 +61,15 @@ export async function GET(request: NextRequest) {
     .eq('employee_id', employee.id)
     .maybeSingle()
 
+  // Capability taxonomy lives in capability_registry. Send the full list so
+  // classify.py can render it in its prompt and validate model output
+  // against it. Cached in the agent's config.json — agents refresh on
+  // re-activation.
+  const { data: capabilities } = await supabase
+    .from('capability_registry')
+    .select('id, label, automatable')
+    .order('sort_order')
+
   return NextResponse.json({
     employee_id: employee.id,
     business_id: employee.business_id,
@@ -69,5 +78,6 @@ export async function GET(request: NextRequest) {
     supabase_anon_key: supabaseAnonKey,
     business_context: profile ?? null,
     role_context: roleProfile ?? null,
+    capabilities: capabilities ?? [],
   })
 }

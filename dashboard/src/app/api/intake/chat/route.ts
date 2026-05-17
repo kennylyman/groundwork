@@ -14,6 +14,7 @@ import { NextRequest, NextResponse } from 'next/server'
 import Anthropic from '@anthropic-ai/sdk'
 import type { ChatMessage, BusinessProfileDraft } from '@/lib/intake-types'
 import { resolveUser } from '@/lib/auth'
+import { checkRateLimit } from '@/lib/rate-limit'
 
 export const maxDuration = 30
 
@@ -252,6 +253,15 @@ export async function POST(request: NextRequest) {
     const user = await resolveUser(request)
     if (!user) {
       return NextResponse.json({ error: 'Not authenticated' }, { status: 401 })
+    }
+
+    // Rate limit per user — no business yet during onboarding. 10/min.
+    const rl = await checkRateLimit(`user:${user.id}`)
+    if (!rl.success) {
+      return NextResponse.json(
+        { error: 'Rate limit exceeded — try again in a minute' },
+        { status: 429, headers: { 'Retry-After': '60' } }
+      )
     }
 
     const body = await request.json()

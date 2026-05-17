@@ -15,8 +15,6 @@
  *   - which detection patterns identify a tool in window titles / URLs
  */
 
-import { CAPABILITY_BY_ID } from './capabilities'
-
 export type Ring = 1 | 2 | 3
 
 export type ToolDefinition = {
@@ -26,8 +24,8 @@ export type ToolDefinition = {
   label: string
   /** Free-text category (operations / billing / comms / etc.) — for grouping. */
   category: 'operations' | 'billing' | 'comms' | 'docs' | 'productivity' | 'other'
-  /** Capability ids (from lib/capabilities.ts) this tool can typically serve
-   *  when connected via Ring 2 (Zapier) or Ring 3 (native). */
+  /** Capability ids (from the capability_registry table) this tool can
+   *  typically serve when connected via Ring 2 (Zapier) or Ring 3 (native). */
   capabilities: string[]
   /** Detection hints. Lowercase substrings checked against window titles + URLs. */
   detect: {
@@ -310,12 +308,4 @@ export function resolveCapability(
     return b.ring - a.ring
   })
   return out
-}
-
-/**
- * Human-readable label for a capability id (for dashboards / prompts).
- * Wraps the capability taxonomy.
- */
-export function capabilityShortLabel(id: string): string {
-  return CAPABILITY_BY_ID[id]?.label ?? id
 }

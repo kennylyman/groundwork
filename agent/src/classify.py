@@ -19,14 +19,31 @@ import anthropic
 import json
 import os
 
-from capabilities import CAPABILITY_IDS, taxonomy_for_prompt
-
 _client = None
 _client_key = None
 
 # Confidence floor for accepting a first-pass classification. Below this we
 # re-run with a stronger reasoning request.
 CONF_BAR = 60
+
+
+# ---------- Capability taxonomy helpers ----------
+
+def _taxonomy_for_prompt(capabilities: list[dict]) -> str:
+    """Render the taxonomy as a compact list the LLM can consume. Source is
+    the list returned by /api/activate (table: capability_registry)."""
+    lines = []
+    for c in capabilities or []:
+        marker = "[AUTOMATABLE]" if c.get("automatable") else ""
+        cap_id = c.get("id", "")
+        label = c.get("label", "")
+        lines.append(f"  {cap_id:42s} — {label} {marker}".rstrip())
+    return "\n".join(lines)
+
+
+def _capability_ids(capabilities: list[dict]) -> set[str]:
+    """Set of valid ids for output sanitization."""
+    return {c["id"] for c in (capabilities or []) if c.get("id")}
 
 
 def _get_client(api_key: str | None = None):
@@ -173,9 +190,13 @@ def _format_role_context(ctx: dict | None) -> str:
     return "\n".join(parts) if parts else "  (Role context partially captured.)"
 
 
-def _build_system_prompt(business_context: dict | None, role_context: dict | None) -> str:
+def _build_system_prompt(
+    capabilities: list[dict],
+    business_context: dict | None,
+    role_context: dict | None,
+) -> str:
     return SYSTEM_PROMPT_TEMPLATE.format(
-        taxonomy=taxonomy_for_prompt(),
+        taxonomy=_taxonomy_for_prompt(capabilities),
         business_context=_format_business_context(business_context),
         role_context=_format_role_context(role_context),
     )
@@ -205,7 +226,7 @@ def _parse_response_text(raw: str) -> dict:
     return json.loads(s)
 
 
-def _sanitize_capabilities(caps: list | None) -> list:
+def _sanitize_capabilities(caps: list | None, valid_ids: set[str]) -> list:
     """Drop tags with unknown ids; normalize the shape."""
     if not isinstance(caps, list):
         return []
@@ -214,7 +235,7 @@ def _sanitize_capabilities(caps: list | None) -> list:
         if not isinstance(c, dict):
             continue
         cap_id = c.get("id")
-        if cap_id not in CAPABILITY_IDS:
+        if cap_id not in valid_ids:
             continue
         out.append({
             "id": cap_id,
@@ -270,21 +291,26 @@ def classify_snapshot(
     api_key: str | None = None,
     business_context: dict | None = None,
     role_context: dict | None = None,
+    capabilities: list[dict] | None = None,
 ) -> dict:
     """
     Classify a capture into structured capabilities + a human-readable rollup.
 
     business_context / role_context are the Phase 2 / Phase 3 context objects.
-    In Phase 1 they are typically None — the system prompt explains to the
-    model to fall back on general priors.
+    capabilities is the taxonomy fetched at activation time (table:
+    capability_registry) and stored in config.json. If None, falls back
+    to an empty taxonomy — model output won't validate against any ids
+    and capabilities will be dropped during sanitization.
     """
     client = _get_client(api_key)
+    caps = capabilities or []
+    valid_ids = _capability_ids(caps)
 
     previous_tasks_str = "\n".join(
         [f"  - {t}" for t in snapshot.get("previous_tasks", [])]
     ) or "  None yet"
 
-    system_prompt = _build_system_prompt(business_context, role_context)
+    system_prompt = _build_system_prompt(caps, business_context, role_context)
     user_prompt = _build_user_prompt(snapshot, previous_tasks_str)
     screenshot_b64 = snapshot["screenshot_b64"]
 
@@ -308,7 +334,7 @@ def classify_snapshot(
             pass
 
     # Normalize machine-readable layer
-    result["capabilities"] = _sanitize_capabilities(result.get("capabilities"))
+    result["capabilities"] = _sanitize_capabilities(result.get("capabilities"), valid_ids)
 
     # Enrich with snapshot signals so transmit.py has them in one place
     result["timestamp"] = snapshot.get("timestamp", "")

@@ -22,7 +22,10 @@
 import { NextRequest, NextResponse } from 'next/server'
 import crypto from 'node:crypto'
 import { serverSupabase } from '@/lib/supabase'
-import { CAPABILITY_BY_ID, capabilityLabel } from '@/lib/capabilities'
+import {
+  getCapabilitiesById,
+  type Capability,
+} from '@/lib/capabilities-server'
 import { loadRateOverrides, resolveRate } from '@/lib/rates'
 
 export const maxDuration = 60
@@ -128,11 +131,15 @@ function patternSignature(
   return crypto.createHash('sha256').update(raw).digest('hex')
 }
 
-function describePattern(capabilityId: string, params: Record<string, string>): {
+function describePattern(
+  capabilityId: string,
+  params: Record<string, string>,
+  capabilitiesById: Record<string, Capability>
+): {
   title: string
   description: string
 } {
-  const label = capabilityLabel(capabilityId)
+  const label = capabilitiesById[capabilityId]?.label ?? capabilityId
   const bits: string[] = []
   if (params.source) bits.push(`from ${params.source}`)
   if (params.destination) bits.push(`to ${params.destination}`)
@@ -146,7 +153,7 @@ function describePattern(capabilityId: string, params: Record<string, string>): 
   }
 }
 
-function automationClassFor(capability: typeof CAPABILITY_BY_ID[string]): 'A' | 'B' | 'C' {
+function automationClassFor(capability: Capability | undefined): 'A' | 'B' | 'C' {
   // Phase 1 heuristic: anything in the data.* / communication.send.* /
   // monitoring.* namespaces is Zapier-able (Class A). Workflow ops and
   // admin.* tend to need a composed agent (Class B). Everything else
@@ -240,7 +247,8 @@ async function detectForEmployee(
   employee: EmployeeRow,
   windowStartIso: string,
   rateOverrides: Record<string, number>,
-  eventsByTool: Map<string, IntegrationEventSummary>
+  eventsByTool: Map<string, IntegrationEventSummary>,
+  capabilitiesById: Record<string, Capability>
 ): Promise<DetectedOpportunity[]> {
   const { data: captures, error } = await supabase
     .from('captures')
@@ -268,7 +276,7 @@ async function detectForEmployee(
     const tags = Array.isArray(cap.capabilities) ? cap.capabilities : []
     for (const tag of tags) {
       if (!tag || typeof tag.id !== 'string') continue
-      const taxonomyEntry = CAPABILITY_BY_ID[tag.id]
+      const taxonomyEntry = capabilitiesById[tag.id]
       if (!taxonomyEntry?.automatable) continue // skip non-automatable tags
 
       const keyParams = normalizeParams(tag.params as Record<string, unknown>)
@@ -304,7 +312,7 @@ async function detectForEmployee(
   for (const b of buckets.values()) {
     if (b.occurrenceCount < MIN_OCCURRENCES) continue
 
-    const taxonomyEntry = CAPABILITY_BY_ID[b.capabilityId]
+    const taxonomyEntry = capabilitiesById[b.capabilityId]
     if (!taxonomyEntry) continue
 
     const observedMinutes = (b.occurrenceCount * CAPTURE_INTERVAL_SECONDS) / 60
@@ -348,7 +356,11 @@ async function detectForEmployee(
       }
     }
 
-    const { title, description } = describePattern(b.capabilityId, b.keyParams)
+    const { title, description } = describePattern(
+      b.capabilityId,
+      b.keyParams,
+      capabilitiesById
+    )
 
     out.push({
       business_id: employee.business_id,
@@ -416,6 +428,12 @@ async function handle(req: NextRequest) {
     const url = new URL(req.url)
     const scopedEmployeeId = url.searchParams.get('employee_id')
 
+    // Pull the canonical capability registry once — every employee's
+    // detection uses the same taxonomy. Cached in-memory for 5 min by
+    // lib/capabilities-server, so repeat runs across the same cron tick
+    // hit the cache.
+    const capabilitiesById = await getCapabilitiesById()
+
     const windowStart = new Date(Date.now() - WINDOW_DAYS * 24 * 60 * 60 * 1000).toISOString()
 
     let query = supabase
@@ -466,7 +484,8 @@ async function handle(req: NextRequest) {
           emp,
           windowStart,
           overrides,
-          events
+          events,
+          capabilitiesById
         )
         const upserted = await upsertOpportunities(supabase, detected)
         totalDetected += upserted

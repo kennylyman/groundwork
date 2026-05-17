@@ -371,6 +371,7 @@ def run_capture_loop(config: dict) -> None:
                     config['anthropic_api_key'],
                     business_context=config.get('business_context'),
                     role_context=config.get('role_context'),
+                    capabilities=config.get('capabilities'),
                 )
                 task = classification.get('task', 'unknown')
                 confidence = classification.get('confidence', 0)

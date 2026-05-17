@@ -11,3 +11,5 @@ dist/
 .next/
 .vercel
 supabase/.temp/
+.env*.local
+.gstack/

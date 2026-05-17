@@ -12,7 +12,7 @@ import {
   Loader2,
   AlertCircle,
 } from 'lucide-react'
-import { capabilityLabel } from '@/lib/capabilities'
+import { useCapabilities } from '@/lib/capabilities-client'
 
 export type ActivityCluster = {
   label: string
@@ -333,6 +333,7 @@ function ClusterRow({
   cluster: ActivityCluster
   paletteClass: string
 }) {
+  const { capabilityLabel } = useCapabilities()
   return (
     <div className="flex items-start gap-3">
       <span className={`shrink-0 mt-1 w-2 h-2 rounded-full ${paletteClass}`} />
