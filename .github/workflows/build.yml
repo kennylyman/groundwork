@@ -51,9 +51,6 @@ jobs:
           BUSINESS_ID=${{ secrets.BUSINESS_ID }}
           "@ | Out-File -FilePath agent/src/.env -Encoding utf8
 
-      - name: Copy Windows capture module
-        run: copy agent\src\capture_windows.py agent\src\capture.py
-
       - name: Build Windows executable
         run: pyinstaller agent/groundwork.spec --clean --distpath dist
 
