@@ -6,6 +6,7 @@ import { ArrowLeft, Zap, Clock, Activity, TrendingUp } from 'lucide-react'
 import Link from 'next/link'
 import { use } from 'react'
 import { PauseToggle, PausedBadge } from '@/components/PauseToggle'
+import { RoleDiscoveryCard, type RoleProfile } from '@/components/RoleDiscoveryCard'
 
 const AUTOMATION_COLORS: Record<string, string> = {
   high: 'text-red-500 bg-red-50 border-red-100',
@@ -25,6 +26,7 @@ export default function EmployeePage({ params }: { params: Promise<{ id: string 
   const { id } = use(params)
   const [employee, setEmployee] = useState<Employee | null>(null)
   const [captures, setCaptures] = useState<Capture[]>([])
+  const [roleProfile, setRoleProfile] = useState<RoleProfile | null>(null)
   const [loading, setLoading] = useState(true)
 
   useEffect(() => {
@@ -33,26 +35,28 @@ export default function EmployeePage({ params }: { params: Promise<{ id: string 
 
   async function loadEmployee() {
     try {
-      const { data: emp } = await supabase
-        .from('employees')
-        .select('*')
-        .eq('id', id)
-        .single()
-
-      setEmployee(emp)
-
       const today = new Date()
       const todayStart = new Date(today.getFullYear(), today.getMonth(), today.getDate()).toISOString()
 
-      const { data: caps } = await supabase
-        .from('captures')
-        .select('*')
-        .eq('employee_id', id)
-        .gte('captured_at', todayStart)
-        .order('captured_at', { ascending: false })
-        .limit(200)
+      const [empRes, capsRes, profileRes] = await Promise.all([
+        supabase.from('employees').select('*').eq('id', id).single(),
+        supabase
+          .from('captures')
+          .select('*')
+          .eq('employee_id', id)
+          .gte('captured_at', todayStart)
+          .order('captured_at', { ascending: false })
+          .limit(200),
+        supabase
+          .from('employee_role_profiles')
+          .select('*')
+          .eq('employee_id', id)
+          .maybeSingle(),
+      ])
 
-      setCaptures(caps || [])
+      setEmployee(empRes.data)
+      setCaptures(capsRes.data || [])
+      setRoleProfile((profileRes.data as RoleProfile | null) ?? null)
     } catch (err) {
       console.error(err)
     } finally {
@@ -117,6 +121,13 @@ export default function EmployeePage({ params }: { params: Promise<{ id: string 
       </div>
 
       <div className="max-w-7xl mx-auto px-8 py-8">
+        {/* Role discovery — only renders when we have a profile */}
+        {roleProfile && (
+          <div className="mb-8">
+            <RoleDiscoveryCard profile={roleProfile} onChange={setRoleProfile} />
+          </div>
+        )}
+
         {/* Stats */}
         <div className="grid grid-cols-4 gap-4 mb-8">
           {[

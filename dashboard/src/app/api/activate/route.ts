@@ -53,6 +53,14 @@ export async function GET(request: NextRequest) {
     .eq('business_id', employee.business_id)
     .maybeSingle()
 
+  // Pull this employee's role profile if Role Discovery has built one.
+  // Same shape as classify.py _format_role_context expects.
+  const { data: roleProfile } = await supabase
+    .from('employee_role_profiles')
+    .select('observed_role, primary_workflows, activity_clusters')
+    .eq('employee_id', employee.id)
+    .maybeSingle()
+
   return NextResponse.json({
     employee_id: employee.id,
     business_id: employee.business_id,
@@ -60,5 +68,6 @@ export async function GET(request: NextRequest) {
     supabase_url: supabaseUrl,
     supabase_anon_key: supabaseAnonKey,
     business_context: profile ?? null,
+    role_context: roleProfile ?? null,
   })
 }

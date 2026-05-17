@@ -4,6 +4,10 @@
     {
       "path": "/api/detect-opportunities",
       "schedule": "0 * * * *"
+    },
+    {
+      "path": "/api/discover-roles",
+      "schedule": "0 2 * * *"
     }
   ]
 }

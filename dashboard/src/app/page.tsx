@@ -2,7 +2,7 @@
 
 import { useEffect, useState } from 'react'
 import { supabase, Employee, Capture } from '@/lib/supabase'
-import { Activity, Users, Zap, TrendingUp, Clock, AlertCircle, FileText } from 'lucide-react'
+import { Activity, Users, Zap, TrendingUp, Clock, AlertCircle, FileText, Sparkles } from 'lucide-react'
 import { useRouter } from 'next/navigation'
 import Link from 'next/link'
 import { PauseToggle, PausedBadge } from '@/components/PauseToggle'
@@ -13,6 +13,7 @@ type EmployeeWithStatus = Employee & {
   today_captures: number
   high_automation_count: number
   status: 'active' | 'idle' | 'offline'
+  has_unack_role_discovery: boolean
 }
 
 const AUTOMATION_COLORS: Record<string, string> = {
@@ -85,6 +86,16 @@ export default function Dashboard() {
       const fifteenMinutesAgo = new Date(now.getTime() - 15 * 60 * 1000).toISOString()
       const sixtyMinutesAgo = new Date(now.getTime() - 60 * 60 * 1000).toISOString()
 
+      // Single query for unacknowledged role discoveries so each row doesn't
+      // need its own round trip.
+      const employeeIds = employeeList.map((e) => e.id)
+      const { data: unackProfiles } = await supabase
+        .from('employee_role_profiles')
+        .select('employee_id')
+        .in('employee_id', employeeIds)
+        .is('acknowledged_at', null)
+      const unackSet = new Set((unackProfiles ?? []).map((p) => p.employee_id))
+
       const enriched: EmployeeWithStatus[] = await Promise.all(
         employeeList.map(async (emp) => {
           const { data: latest } = await supabase
@@ -120,6 +131,7 @@ export default function Dashboard() {
             latest_capture: latest || undefined,
             today_captures: todayCount || 0,
             high_automation_count: highAutoCount || 0,
+            has_unack_role_discovery: unackSet.has(emp.id),
             status,
           }
         })
@@ -248,6 +260,7 @@ export default function Dashboard() {
                       <div className="flex items-center gap-1.5">
                         <p className="text-sm font-medium text-gray-900 truncate">{emp.name}</p>
                         {emp.is_paused && <PausedBadge />}
+                        {emp.has_unack_role_discovery && <RoleDiscoveryBadge />}
                       </div>
                       <p className="text-xs text-gray-500">{emp.role || 'Admin'}</p>
                     </div>
@@ -329,5 +342,17 @@ export default function Dashboard() {
         </div>
       </div>
     </div>
+  )
+}
+
+function RoleDiscoveryBadge() {
+  return (
+    <span
+      title="New role insight from observed behavior — click through to review"
+      className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-medium bg-indigo-50 text-indigo-700 border border-indigo-200"
+    >
+      <Sparkles className="w-2.5 h-2.5" />
+      New role insight
+    </span>
   )
 }
