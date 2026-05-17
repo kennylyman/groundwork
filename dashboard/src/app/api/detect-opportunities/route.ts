@@ -23,6 +23,7 @@ import { NextRequest, NextResponse } from 'next/server'
 import crypto from 'node:crypto'
 import { serverSupabase } from '@/lib/supabase'
 import { CAPABILITY_BY_ID, capabilityLabel } from '@/lib/capabilities'
+import { loadRateOverrides, resolveRate } from '@/lib/rates'
 
 export const maxDuration = 60
 
@@ -37,30 +38,9 @@ const WORKING_DAYS_PER_YEAR = 250
 // Conservative — we'd rather under-promise.
 const SAVINGS_RATE = 0.7
 
-// Same role-rate lookup as the intelligence report so the two views never
-// disagree. Mirror with /api/generate-intelligence — extract to a shared
-// helper later if either side gains more nuance.
-const DEFAULT_HOURLY_RATE = 25
-const ROLE_HOURLY_RATES: Record<string, number> = {
-  scheduler: 24,
-  scheduling: 24,
-  billing: 28,
-  biller: 28,
-  caregiver: 20,
-  admin: 25,
-  administrator: 25,
-  manager: 35,
-  owner: 50,
-}
-
-function hourlyRateForRole(role?: string | null): number {
-  if (!role) return DEFAULT_HOURLY_RATE
-  const norm = role.trim().toLowerCase()
-  for (const [key, rate] of Object.entries(ROLE_HOURLY_RATES)) {
-    if (norm.includes(key)) return rate
-  }
-  return DEFAULT_HOURLY_RATE
-}
+// Rate resolution shares lib/rates with /api/generate-intelligence so the two
+// views never disagree on dollar figures. Owner overrides come from
+// business_profiles.role_hourly_rates (via /settings/pricing).
 
 // Keys we hash into the pattern signature — these are the ones that
 // distinguish two opportunities of the same capability. Everything else
@@ -202,7 +182,8 @@ function scoreConfidence(
 async function detectForEmployee(
   supabase: ReturnType<typeof serverSupabase>,
   employee: EmployeeRow,
-  windowStartIso: string
+  windowStartIso: string,
+  rateOverrides: Record<string, number>
 ): Promise<DetectedOpportunity[]> {
   const { data: captures, error } = await supabase
     .from('captures')
@@ -260,7 +241,7 @@ async function detectForEmployee(
   }
 
   // Convert buckets to opportunities.
-  const hourlyRate = hourlyRateForRole(employee.role)
+  const hourlyRate = resolveRate(employee.role, rateOverrides)
   const out: DetectedOpportunity[] = []
 
   for (const b of buckets.values()) {
@@ -363,9 +344,21 @@ async function handle(req: NextRequest) {
     let totalEmployeesProcessed = 0
     const errors: string[] = []
 
+    // Cache rate overrides per business so we don't re-fetch for every
+    // employee in the same business.
+    const ratesByBusiness = new Map<string, Record<string, number>>()
+    async function getOverrides(bizId: string) {
+      const cached = ratesByBusiness.get(bizId)
+      if (cached) return cached
+      const fetched = await loadRateOverrides(supabase, bizId).catch(() => ({}))
+      ratesByBusiness.set(bizId, fetched)
+      return fetched
+    }
+
     for (const emp of employees as EmployeeRow[]) {
       try {
-        const detected = await detectForEmployee(supabase, emp, windowStart)
+        const overrides = await getOverrides(emp.business_id)
+        const detected = await detectForEmployee(supabase, emp, windowStart, overrides)
         const upserted = await upsertOpportunities(supabase, detected)
         totalDetected += upserted
         totalEmployeesProcessed += 1

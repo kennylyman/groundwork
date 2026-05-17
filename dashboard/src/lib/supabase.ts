@@ -46,9 +46,11 @@ export type Employee = {
   business_id: string
   name: string
   role: string
+  email?: string | null
   install_token: string
   is_active: boolean
   is_paused: boolean
+  invite_sent_at?: string | null
   created_at: string
 }
 

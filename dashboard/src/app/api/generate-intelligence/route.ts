@@ -11,30 +11,10 @@ const MODEL = 'claude-sonnet-4-20250514'
 const CAPTURE_INTERVAL_SECONDS = 30
 const WORKING_DAYS_PER_YEAR = 250
 
-// Rough hourly rates for home-care admin work. Used to convert captured time
-// to an annual cost. These are server-side defaults so the dollar figure is
-// deterministic; Claude doesn't get to fudge it.
-const DEFAULT_HOURLY_RATE = 25
-const ROLE_HOURLY_RATES: Record<string, number> = {
-  scheduler: 24,
-  scheduling: 24,
-  billing: 28,
-  biller: 28,
-  caregiver: 20,
-  admin: 25,
-  administrator: 25,
-  manager: 35,
-  owner: 50,
-}
-
-function hourlyRateForRole(role?: string | null): number {
-  if (!role) return DEFAULT_HOURLY_RATE
-  const norm = role.trim().toLowerCase()
-  for (const [key, rate] of Object.entries(ROLE_HOURLY_RATES)) {
-    if (norm.includes(key)) return rate
-  }
-  return DEFAULT_HOURLY_RATE
-}
+// Hourly rates resolved through lib/rates: per-business overrides from
+// /settings/pricing first, then hardcoded defaults. Server-side computation
+// is deterministic — Claude doesn't get to fudge the dollar figure.
+import { loadRateOverrides, resolveRate } from '@/lib/rates'
 
 const SYSTEM_PROMPT = `You are a process automation consultant analyzing operational data for a home care agency owner. You are given:
 - An employee's role and the category of work being analyzed
@@ -156,7 +136,7 @@ export async function POST(request: NextRequest) {
 
     const { data: employee } = await supabase
       .from('employees')
-      .select('name, role')
+      .select('name, role, business_id')
       .eq('id', employeeId)
       .single()
 
@@ -166,7 +146,10 @@ export async function POST(request: NextRequest) {
     const totalHours = totalSeconds / 3600
     const dailyHours = totalHours / 7
     const annualHours = Math.round(dailyHours * WORKING_DAYS_PER_YEAR)
-    const hourlyRate = hourlyRateForRole(employee?.role)
+    const overrides = employee?.business_id
+      ? await loadRateOverrides(supabase, employee.business_id).catch(() => ({}))
+      : {}
+    const hourlyRate = resolveRate(employee?.role, overrides)
     const annualCost = Math.round(annualHours * hourlyRate)
     const weeklyHours = Math.round(totalHours * 10) / 10 // 1 decimal
 
