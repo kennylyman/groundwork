@@ -76,19 +76,41 @@ const REFRESH_SAFETY_MS = 5 * 60 * 1000
  *  "auth" (case-insensitive). The runtime never persists these. */
 const SECRET_KEY_RE = /token|secret|key|password|auth/i
 
+/** Keys that carry PII or message content. Audit logs are owner-readable
+ *  via RLS but customer data shouldn't sit in a queryable table — the
+ *  audit log's purpose is metadata (what was called when, did it succeed)
+ *  not the content of every email body Groundwork ever sent. We swap
+ *  these values for a redacted marker (plus a length hint for debugging
+ *  truncation issues without exposing content). */
+const PII_KEY_RE = /^(to|from|email|recipient|recipients|address|cc|bcc|body|text|message|subject|preview|content|html)$/i
+
 function sanitizeArgs(args: Record<string, unknown>): Record<string, unknown> {
   const out: Record<string, unknown> = {}
   for (const [k, v] of Object.entries(args)) {
     if (SECRET_KEY_RE.test(k)) {
-      out[k] = '[redacted]'
+      out[k] = '[redacted:secret]'
+      continue
+    }
+    if (PII_KEY_RE.test(k)) {
+      if (typeof v === 'string') {
+        out[k] = `[redacted:pii ${v.length}c]`
+      } else if (Array.isArray(v)) {
+        out[k] = `[redacted:pii ${v.length}items]`
+      } else {
+        out[k] = '[redacted:pii]'
+      }
       continue
     }
     if (typeof v === 'string' && v.length > 200) {
       // Long strings often carry body content we don't need in the audit
       // log. Truncate to keep rows reasonable.
       out[k] = v.slice(0, 200) + '…'
+    } else if (Array.isArray(v)) {
+      // Don't recurse into arrays — log their length only. Avoids the
+      // weird {0:..,1:..,length:N} shape we'd get from naively
+      // recursing through Object.entries on an array.
+      out[k] = `[array length=${v.length}]`
     } else if (typeof v === 'object' && v !== null) {
-      // One level deep; deeper nesting falls through as-is.
       out[k] = sanitizeArgs(v as Record<string, unknown>)
     } else {
       out[k] = v

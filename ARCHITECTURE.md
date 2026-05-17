@@ -1,6 +1,6 @@
 # Groundwork — Architecture
 
-> **Last updated: 2026-05-17 (evening)** (commit-aligned).
+> **Last updated: 2026-05-17 (late evening)** (commit-aligned).
 >
 > **Update protocol.** Any commit that changes the data flow, adds/removes
 > a top-level system component (table, API route, cron, adapter, external
@@ -695,6 +695,42 @@ deferred.
 ## 9. Recent Architectural Changes
 
 > Newest first. Trim entries older than 6 months.
+
+- **2026-05-17 (late evening)** — Post-Monday-prep audit fixes:
+  - **Enrichment window matched to cron cadence.** WINDOW_MINUTES was
+    15 in `/api/integrations/enrich-captures` while the cron ran daily
+    — so enrichment only saw the last 15 minutes once per day,
+    catching near-zero captures (CK's 04:00 UTC = 23:00 EST,
+    nobody working). Bumped to 25 hours so a daily cron covers a
+    full day's captures + 1h overlap. MAX_PER_RUN dropped to 100 to
+    fit the 60s function timeout at ~500ms/enrichment. Three already-
+    shipped gap fixes (capture_enrichments UI surfacing, synthetic
+    integration_events, Workflow Map context) now actually have data
+    to work with.
+  - **/api/captures rate limit** at 30/min per install_token.
+    Separate Upstash limiter (`gw:captures` prefix) from the LLM
+    limiter. Token is SHA256-hashed before use as the limit key so
+    Upstash never sees the bare credential. Fails OPEN on Upstash
+    errors (we'd rather accept captures than lose data).
+  - **/api/captures capability validation.** Capability ids in the
+    payload are filtered against `getCapabilitiesById()` before
+    insert. classify.py sanitizes its own output, but a tampered or
+    replaced agent could send arbitrary capability ids; server-side
+    filtering is the last line of defense for the workflow map +
+    opportunity detector that consume these.
+  - **/api/captures is_paused enforcement.** A paused employee's
+    agent polls is_paused every 5 captures, so there's a ~2.5min
+    window where captures could land after pause. The endpoint now
+    looks up is_paused and returns 423 Locked if true. The dashboard
+    pause toggle is now authoritative.
+  - **tool_call_logs PII redaction expanded.** sanitizeArgs adds a
+    second pattern (`/^(to|from|email|recipient|...|body|subject)$/`)
+    that swaps PII values for `[redacted:pii Nc]` markers (length hint
+    only, no content). Array values get logged as `[array length=N]`
+    instead of recursing through `Object.entries()` and producing
+    weird object-shaped output. The audit log is metadata-only —
+    every email body Groundwork sends no longer lands in a queryable
+    table.
 
 - **2026-05-17 (evening)** — Worked through all 12 gaps from the
   initial 2026-05-17 ARCHITECTURE.md draft. Notable adds:

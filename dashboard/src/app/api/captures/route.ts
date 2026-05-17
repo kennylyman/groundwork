@@ -18,6 +18,8 @@
  */
 import { NextRequest, NextResponse } from 'next/server'
 import { serverSupabase } from '@/lib/supabase'
+import { checkCapturesRateLimit } from '@/lib/rate-limit'
+import { getCapabilitiesById } from '@/lib/capabilities-server'
 
 export const maxDuration = 15
 
@@ -54,6 +56,17 @@ export async function POST(request: NextRequest) {
     )
   }
 
+  // Rate limit BEFORE parsing the body. Cheap reject for stolen-token
+  // spam. Token is hashed inside checkCapturesRateLimit so the bare
+  // credential never reaches Upstash's logs.
+  const rl = await checkCapturesRateLimit(token)
+  if (!rl.success) {
+    return NextResponse.json(
+      { error: 'rate limit exceeded', retry_after_ms: rl.reset },
+      { status: 429 }
+    )
+  }
+
   let body: CapturePayload
   try {
     body = (await request.json()) as CapturePayload
@@ -69,7 +82,7 @@ export async function POST(request: NextRequest) {
 
   const { data: employee, error: empErr } = await supabase
     .from('employees')
-    .select('id, business_id, is_active')
+    .select('id, business_id, is_active, is_paused')
     .eq('install_token', token)
     .maybeSingle()
 
@@ -83,6 +96,13 @@ export async function POST(request: NextRequest) {
   }
   if (!employee.is_active) {
     return NextResponse.json({ error: 'employee inactive' }, { status: 403 })
+  }
+  if (employee.is_paused) {
+    // Agent polls is_paused every 5 captures; there's a ~2.5-min window
+    // where it might still post while the dashboard says paused. Reject
+    // server-side so the pause toggle is authoritative. 423 = Locked so
+    // the agent can distinguish this from auth failures.
+    return NextResponse.json({ error: 'employee paused' }, { status: 423 })
   }
 
   // Cross-check: payload's employee_id + business_id must match the
@@ -103,6 +123,30 @@ export async function POST(request: NextRequest) {
     )
   }
 
+  // Validate capabilities[] against the registry — drop anything that
+  // isn't a known capability id. classify.py sanitizes its own output,
+  // but the agent could be tampered or replaced with something that
+  // sends arbitrary jsonb; the server is the final defense against
+  // capability-id pollution that would corrupt the workflow map and
+  // opportunity detector downstream.
+  const capabilitiesById = await getCapabilitiesById()
+  const validCapabilities = Array.isArray(body.capabilities)
+    ? body.capabilities
+        .filter(
+          (c): c is { id: string; params?: unknown; confidence?: unknown } =>
+            !!c &&
+            typeof c === 'object' &&
+            typeof (c as { id?: unknown }).id === 'string' &&
+            !!capabilitiesById[(c as { id: string }).id]
+        )
+        .map((c) => ({
+          id: c.id,
+          params: c.params && typeof c.params === 'object' ? c.params : {},
+          confidence:
+            typeof c.confidence === 'number' ? c.confidence : 0,
+        }))
+    : []
+
   // Build the insert row from the validated identity (don't trust body
   // for these two) plus pass-through fields.
   const row = {
@@ -119,7 +163,7 @@ export async function POST(request: NextRequest) {
     workflow_step: body.workflow_step ?? null,
     trigger: body.trigger ?? null,
     reasoning: body.reasoning ?? null,
-    capabilities: Array.isArray(body.capabilities) ? body.capabilities : [],
+    capabilities: validCapabilities,
     active_window: body.active_window ?? null,
     active_url: body.active_url ?? null,
     keystrokes: body.keystrokes ?? 0,

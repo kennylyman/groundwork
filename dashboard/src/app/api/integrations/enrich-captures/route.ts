@@ -25,8 +25,17 @@ import type { CaptureForEnrichment } from '@/lib/integrations/adapters/types'
 
 export const maxDuration = 60
 
-const WINDOW_MINUTES = 15
-const MAX_PER_RUN = 200
+// Look-back window. Needs to span at least one cron interval + safety
+// margin so no captures fall through the cracks. On Hobby plan the cron
+// runs daily (`0 4 * * *`), so we look back 25 hours — covers a full day
+// plus an hour of slack for cron skew. When we move to Pro and the cron
+// returns to `*/5 * * * *`, drop this back to ~15 minutes.
+const WINDOW_MINUTES = 25 * 60
+// Per-cron cap. Each enrichment fires 1-2 provider API calls (~300-500ms
+// each), processed sequentially. 100 caps × 500ms = ~50s, comfortably
+// under the 60s function maxDuration. Captures beyond this cap roll
+// forward to the next daily run.
+const MAX_PER_RUN = 100
 
 function authorized(req: NextRequest): boolean {
   const cronHeader = req.headers.get('authorization')
