@@ -63,11 +63,16 @@ export async function middleware(request: NextRequest) {
   }
 
   // --- Authenticated visitor ---
-  // We only need to know about the business for routes where it affects
-  // routing: the auth pages (redirect away from them) and routes that
-  // require a business (root dashboard).
-  const needsBusinessCheck = isAuthPage || REQUIRES_BUSINESS.has(pathname)
-  if (needsBusinessCheck) {
+  // The dashboard ('/') requires BOTH a business AND a completed intake.
+  // Auth pages ('/login', '/signup') need the same info to decide where to
+  // bounce a logged-in user.
+  //
+  // Intake completion is gated separately from business existence: an owner
+  // who signed up under the old flow has a business row but no intake
+  // profile — they should still be routed through /team-onboarding to fill
+  // it in, not handed the dashboard with empty context.
+  const needsRoutingDecision = isAuthPage || REQUIRES_BUSINESS.has(pathname)
+  if (needsRoutingDecision) {
     const { data: business } = await supabase
       .from('businesses')
       .select('id')
@@ -75,18 +80,32 @@ export async function middleware(request: NextRequest) {
       .maybeSingle()
 
     const hasBusiness = !!business
+    let intakeDone = false
 
-    // Authed user shouldn't see /login or /signup — route by business state.
+    if (hasBusiness) {
+      const { data: profile } = await supabase
+        .from('business_profiles')
+        .select('intake_completed_at, intake_skipped_at')
+        .eq('business_id', business!.id)
+        .maybeSingle()
+      // Either timestamp counts as "done" — owner who clicked Skip the rest
+      // shouldn't be looped back to the chat on every page load.
+      intakeDone = !!profile?.intake_completed_at || !!profile?.intake_skipped_at
+    }
+
+    const fullySetUp = hasBusiness && intakeDone
+
+    // Authed user shouldn't see /login or /signup — route by setup state.
     if (isAuthPage) {
       return redirectKeepingCookies(
         request,
-        hasBusiness ? '/' : '/team-onboarding',
+        fullySetUp ? '/' : '/team-onboarding',
         response
       )
     }
 
-    // Authed user on / without a business → finish setup first.
-    if (REQUIRES_BUSINESS.has(pathname) && !hasBusiness) {
+    // Authed user on / who hasn't finished setup → finish it first.
+    if (REQUIRES_BUSINESS.has(pathname) && !fullySetUp) {
       return redirectKeepingCookies(request, '/team-onboarding', response)
     }
   }
