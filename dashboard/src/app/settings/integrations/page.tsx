@@ -16,6 +16,7 @@ import {
   Sparkles,
 } from 'lucide-react'
 import { TOOL_BY_ID, TOOL_REGISTRY } from '@/lib/integrations'
+import { NATIVE_TOOL_MANIFEST } from '@/lib/integrations/adapters/manifest'
 
 type Ring = 1 | 2 | 3
 
@@ -211,11 +212,51 @@ function IntegrationsSettingsInner() {
     })
   }
 
-  // ----- Build the unified tool list -----
-  const tools: ToolEntry[] = (() => {
+  // ----- Native tools — always render from the manifest --------------
+  //
+  // The native list is a client-side constant (NATIVE_TOOL_MANIFEST). We
+  // don't gate this section on the API call returning anything — owners
+  // see the Slack Connect button on first paint, even before
+  // /api/integrations/state resolves. When the API does come back, we
+  // overlay any existing integration rows (connected state, account
+  // label, expiry) on top.
+  const nativeToolIds = new Set(NATIVE_TOOL_MANIFEST.map((m) => m.toolName))
+
+  const nativeTools: ToolEntry[] = NATIVE_TOOL_MANIFEST.map((m) => {
+    const def = TOOL_BY_ID[m.toolName]
+    const detected = state?.detected_tools.find((d) => d.tool_id === m.toolName)
+    const intake = state?.intake_tools.find((it) => it.tool_id === m.toolName)
+    const rows = (state?.integrations ?? []).filter(
+      (i) => i.tool_name === m.toolName
+    )
+    return {
+      tool_id: m.toolName,
+      tool_label: def?.label || m.label,
+      capture_count_7d: detected?.capture_count_7d ?? 0,
+      in_intake: !!intake,
+      in_intake_used_for: intake?.used_for ?? [],
+      rings: {
+        1: rows.find((r) => r.ring === 1) ?? null,
+        2: rows.find((r) => r.ring === 2) ?? null,
+        3: rows.find((r) => r.ring === 3) ?? null,
+      },
+      capabilities: def?.capabilities || [],
+      ring2Available: def?.ring2Available ?? true,
+      ring3Available: true,
+      native: true,
+    } satisfies ToolEntry
+  }).sort((a, b) => {
+    // Connected first, then alpha.
+    const aOn = a.rings[3]?.status === 'connected'
+    const bOn = b.rings[3]?.status === 'connected'
+    if (aOn !== bOn) return aOn ? -1 : 1
+    return a.tool_label.localeCompare(b.tool_label)
+  })
+
+  // ----- Other (non-native) tools — only after the API responds -------
+  const otherTools: ToolEntry[] = (() => {
     if (!state) return []
     const seen = new Map<string, ToolEntry>()
-    const nativeSet = new Set(state.native_tools)
 
     function ensure(tool_id: string, tool_label: string): ToolEntry {
       const existing = seen.get(tool_id)
@@ -230,50 +271,43 @@ function IntegrationsSettingsInner() {
         rings: { 1: null, 2: null, 3: null },
         capabilities: def?.capabilities || [],
         ring2Available: def?.ring2Available ?? true,
-        ring3Available: nativeSet.has(tool_id),
-        native: nativeSet.has(tool_id),
+        ring3Available: false,
+        native: false,
       }
       seen.set(tool_id, fresh)
       return fresh
     }
 
-    // Always show every natively-supported tool so owners discover them
-    // even before the agent has captured anything.
-    for (const native of state.native_tools) {
-      ensure(native, TOOL_BY_ID[native]?.label || native)
-    }
     for (const d of state.detected_tools) {
+      if (nativeToolIds.has(d.tool_id)) continue
       const t = ensure(d.tool_id, d.tool_label)
       t.capture_count_7d = d.capture_count_7d
     }
     for (const i of state.intake_tools) {
+      if (nativeToolIds.has(i.tool_id)) continue
       const t = ensure(i.tool_id, i.tool_label)
       t.in_intake = true
       t.in_intake_used_for = i.used_for
     }
     for (const row of state.integrations) {
-      const t = ensure(row.tool_name, TOOL_BY_ID[row.tool_name]?.label || row.tool_name)
+      if (nativeToolIds.has(row.tool_name)) continue
+      const t = ensure(
+        row.tool_name,
+        TOOL_BY_ID[row.tool_name]?.label || row.tool_name
+      )
       t.rings[row.ring] = row
     }
 
     return Array.from(seen.values()).sort((a, b) => {
-      // Connected (ring 3) first, then native (offering 1-click) next,
-      // then connected via Zapier, then by detection volume, then alpha.
-      const a3 = a.rings[3]?.status === 'connected'
-      const b3 = b.rings[3]?.status === 'connected'
-      if (a3 !== b3) return a3 ? -1 : 1
-      if (a.native !== b.native) return a.native ? -1 : 1
       const a2 = a.rings[2]?.status === 'connected'
       const b2 = b.rings[2]?.status === 'connected'
       if (a2 !== b2) return a2 ? -1 : 1
-      if (a.capture_count_7d !== b.capture_count_7d)
+      if (a.capture_count_7d !== b.capture_count_7d) {
         return b.capture_count_7d - a.capture_count_7d
+      }
       return a.tool_label.localeCompare(b.tool_label)
     })
   })()
-
-  const nativeTools = tools.filter((t) => t.native)
-  const otherTools = tools.filter((t) => !t.native)
 
   return (
     <div className="space-y-6">
@@ -305,7 +339,10 @@ function IntegrationsSettingsInner() {
         </div>
       )}
 
-      {/* Native integrations — the primary path */}
+      {/* Native integrations — always rendered, even before API state
+          arrives. The list comes from NATIVE_TOOL_MANIFEST so the
+          Connect button is present on first paint; we overlay
+          connection status from the API when it lands. */}
       <div className="bg-white rounded-2xl border border-gray-200">
         <div className="px-6 py-4 border-b border-gray-100">
           <div className="flex items-center gap-2">
@@ -324,27 +361,17 @@ function IntegrationsSettingsInner() {
           </div>
         </div>
 
-        {loadingState ? (
-          <div className="px-6 py-12 text-center">
-            <Loader2 className="w-5 h-5 animate-spin text-gray-400 mx-auto" />
-          </div>
-        ) : nativeTools.length === 0 ? (
-          <div className="px-6 py-10 text-center text-sm text-gray-500">
-            No native integrations available yet.
-          </div>
-        ) : (
-          <div className="divide-y divide-gray-50">
-            {nativeTools.map((tool) => (
-              <NativeToolRow
-                key={tool.tool_id}
-                tool={tool}
-                busy={busy}
-                onConnect={() => connectNative(tool.tool_id)}
-                onDisconnect={() => disconnectNative(tool.tool_id)}
-              />
-            ))}
-          </div>
-        )}
+        <div className="divide-y divide-gray-50">
+          {nativeTools.map((tool) => (
+            <NativeToolRow
+              key={tool.tool_id}
+              tool={tool}
+              busy={busy}
+              onConnect={() => connectNative(tool.tool_id)}
+              onDisconnect={() => disconnectNative(tool.tool_id)}
+            />
+          ))}
+        </div>
       </div>
 
       {/* Other tools list — these can still be connected via Zapier */}
