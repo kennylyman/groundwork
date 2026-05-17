@@ -8,6 +8,7 @@ import Link from 'next/link'
 import { PauseToggle, PausedBadge } from '@/components/PauseToggle'
 import { OpportunitiesTable } from '@/components/OpportunitiesTable'
 import { ConnectionPrompts } from '@/components/ConnectionPrompts'
+import { WorkflowIntelligenceMap } from '@/components/WorkflowIntelligenceMap'
 
 type EmployeeWithStatus = Employee & {
   latest_capture?: Capture
@@ -239,6 +240,14 @@ export default function Dashboard() {
       </div>
 
       <div className="max-w-7xl mx-auto px-8 py-8">
+        {/* Workflow Intelligence Map — the hero visualization. Full width,
+            dark, animated. Shows employees + their tasks + automation
+            clusters as a live force-directed graph. Collapses to a thin
+            summary bar if the owner prefers the table view. */}
+        <div className="mb-8">
+          <WorkflowIntelligenceMap />
+        </div>
+
         {/* Stats */}
         <div className="grid grid-cols-4 gap-4 mb-8">
           {[
