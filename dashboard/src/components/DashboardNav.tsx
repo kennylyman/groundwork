@@ -8,6 +8,7 @@ import {
   FileText,
   Settings as SettingsIcon,
 } from 'lucide-react'
+import { SignOutButton } from '@/components/SignOutButton'
 
 /**
  * Shared top-strip for any internal page that isn't the home dashboard.
@@ -82,6 +83,7 @@ export function DashboardNav({
             label="Settings"
             active={pathname?.startsWith('/settings')}
           />
+          <SignOutButton />
         </div>
       </div>
     </div>

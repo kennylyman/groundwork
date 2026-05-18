@@ -9,6 +9,7 @@ import { PauseToggle, PausedBadge } from '@/components/PauseToggle'
 import { OpportunitiesTable } from '@/components/OpportunitiesTable'
 import { ConnectionPrompts } from '@/components/ConnectionPrompts'
 import { WorkflowIntelligenceMap } from '@/components/WorkflowIntelligenceMap'
+import { SignOutButton } from '@/components/SignOutButton'
 import {
   computeHeartbeatStatus,
   ageLabel,
@@ -254,6 +255,7 @@ export default function Dashboard() {
               <Settings className="w-3.5 h-3.5" />
               Settings
             </Link>
+            <SignOutButton />
             <div className="flex items-center gap-2 ml-1">
               <div className="w-2 h-2 bg-green-400 rounded-full animate-pulse" />
               <span className="text-xs text-gray-500">Live</span>
