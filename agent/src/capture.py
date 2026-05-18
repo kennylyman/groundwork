@@ -66,23 +66,91 @@ def get_and_reset_counts():
 def get_idle_seconds():
     return time.time() - last_activity_time
 
-def capture_screenshot():
-    """Capture primary monitor screenshot, return as base64 PNG string."""
+def _detect_active_monitor_index(sct) -> int:
+    """Return the mss monitor index that contains the active window.
+    Falls back to 1 (primary) on any error.
+
+    Windows path: uses GetForegroundWindow + GetWindowRect to find the
+    active window's screen rectangle, then matches the center point
+    against mss.monitors[1..N] (monitors[0] is the virtual all-screens
+    bounding box, not a real monitor).
+
+    Non-Windows: returns 1 unconditionally. The Mac path could use
+    NSScreen.screenContainingPoint but we don't ship the agent on Mac;
+    dev runs are single-monitor in practice."""
+    if platform.system() != "Windows":
+        return 1
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        hwnd = ctypes.windll.user32.GetForegroundWindow()
+        if not hwnd:
+            return 1
+
+        rect = wintypes.RECT()
+        if not ctypes.windll.user32.GetWindowRect(hwnd, ctypes.byref(rect)):
+            return 1
+
+        # Minimized windows on Windows report rect coords near
+        # (-32000, -32000). Treat that as "no real position" → primary.
+        if rect.left < -10000 or rect.top < -10000:
+            return 1
+
+        cx = (rect.left + rect.right) // 2
+        cy = (rect.top + rect.bottom) // 2
+
+        # mss exposes monitors as a list where index 0 is the virtual
+        # screen (all monitors as one bounding box) and indices 1..N are
+        # the actual monitors. We iterate the real monitors and pick the
+        # first one whose rectangle contains the window's center.
+        for i in range(1, len(sct.monitors)):
+            m = sct.monitors[i]
+            left = m["left"]
+            top = m["top"]
+            right = left + m["width"]
+            bottom = top + m["height"]
+            if left <= cx < right and top <= cy < bottom:
+                return i
+
+        return 1
+    except Exception:
+        return 1
+
+
+def capture_screenshot() -> tuple[str, int]:
+    """Capture the monitor containing the active window, return
+    (base64 PNG, monitor index). Index is the mss monitors[] index
+    (1 = primary, 2+ = additional monitors). Always falls back to
+    primary on detection failure."""
     with mss.mss() as sct:
-        monitor = sct.monitors[1]
+        monitor_index = _detect_active_monitor_index(sct)
+        # Defensive: mss.monitors[] is mutable across calls; the
+        # detector returned an index that should be valid for this sct,
+        # but be paranoid in case a monitor was unplugged between
+        # detection and grab.
+        try:
+            monitor = sct.monitors[monitor_index]
+        except (IndexError, KeyError):
+            monitor_index = 1
+            monitor = sct.monitors[1]
+
         screenshot = sct.grab(monitor)
         img = Image.frombytes("RGB", screenshot.size, screenshot.rgb)
-        
+
         # Resize to reduce API payload — 1280px wide max
         max_width = 1280
         if img.width > max_width:
             ratio = max_width / img.width
             new_height = int(img.height * ratio)
             img = img.resize((max_width, new_height), Image.LANCZOS)
-        
+
         buffer = io.BytesIO()
         img.save(buffer, format="PNG", optimize=True)
-        return base64.b64encode(buffer.getvalue()).decode("utf-8")
+        return (
+            base64.b64encode(buffer.getvalue()).decode("utf-8"),
+            monitor_index,
+        )
 
 def get_active_window():
     """Get active window title cross-platform."""
@@ -156,14 +224,21 @@ def build_context_snapshot(previous_tasks=None):
     """
     keystrokes, clicks, pastes = get_and_reset_counts()
     idle = get_idle_seconds()
-    
+    screenshot_b64, monitor_index = capture_screenshot()
+
     snapshot = {
         # UTC with Z suffix. Supabase's captured_at column is timestamptz —
         # without the Z it would be parsed as local time on whichever machine
         # PostgREST runs on, which silently skews Role Discovery's
         # "mornings vs afternoons" rollups for every employee.
         "timestamp": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
-        "screenshot_b64": capture_screenshot(),
+        "screenshot_b64": screenshot_b64,
+        # Which mss monitor was captured. 1 = primary (or fallback when
+        # the active window couldn't be located). 2+ = the secondary
+        # monitor that contained the active window. Lets the dashboard
+        # spot multi-monitor employees and debug "why does this capture
+        # show the wrong screen".
+        "monitor_index": monitor_index,
         "active_window": get_active_window(),
         "active_url": get_active_url(),
         "keystrokes_last_90s": keystrokes,
@@ -173,7 +248,7 @@ def build_context_snapshot(previous_tasks=None):
         "is_idle": idle > 60,
         "previous_tasks": previous_tasks or [],
     }
-    
+
     return snapshot
 
 
@@ -192,4 +267,5 @@ if __name__ == "__main__":
     print(f"Mouse clicks:  {snapshot['mouse_clicks_last_90s']}")
     print(f"Idle seconds:  {snapshot['idle_seconds']}")
     print(f"Screenshot:    {len(snapshot['screenshot_b64'])} chars (base64)")
+    print(f"Monitor:       index {snapshot['monitor_index']}")
     print("\nCapture successful.")

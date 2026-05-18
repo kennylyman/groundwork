@@ -64,6 +64,11 @@ def _build_payload(snapshot: dict, classification: dict, session_id: str, config
         "copy_paste_events": snapshot.get("copy_paste_events_last_90s", 0),
         "idle_seconds": idle_seconds,
         "is_idle": idle_seconds > 60,
+        # Which monitor (mss index) was captured. Always 1 (primary) for
+        # single-monitor users; 2+ when the active window was on a
+        # secondary monitor. Missing in payloads from agents older than
+        # v0.5.1 — server defaults to null.
+        "monitor_index": snapshot.get("monitor_index"),
         # raw_json + flags columns were dropped in migration 0009; the
         # classifier's `flags` output stays in the local result dict for
         # logging (see classify.print_classification) but isn't sent.

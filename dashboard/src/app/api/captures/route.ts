@@ -45,6 +45,7 @@ type CapturePayload = {
   copy_paste_events?: number | null
   idle_seconds?: number | null
   is_idle?: boolean | null
+  monitor_index?: number | null
 }
 
 export async function POST(request: NextRequest) {
@@ -171,6 +172,16 @@ export async function POST(request: NextRequest) {
     copy_paste_events: body.copy_paste_events ?? 0,
     idle_seconds: body.idle_seconds ?? 0,
     is_idle: body.is_idle ?? false,
+    // monitor_index: 1 (primary) / 2+ (secondary monitor where the active
+    // window was). Null when the agent is pre-v0.5.1 or detection failed.
+    // Validate it's a sensible positive integer; otherwise null.
+    monitor_index:
+      typeof body.monitor_index === 'number' &&
+      Number.isInteger(body.monitor_index) &&
+      body.monitor_index >= 1 &&
+      body.monitor_index < 100
+        ? body.monitor_index
+        : null,
   }
 
   const { data: inserted, error: insErr } = await supabase

@@ -91,6 +91,10 @@ export type Capture = {
   is_idle: boolean
   capabilities?: CaptureCapabilityTag[] | null
   capture_enrichments?: CaptureEnrichments | null
+  /** mss monitor index that was captured. 1 = primary (or fallback when
+   *  detection failed), 2+ = secondary monitor that contained the active
+   *  window. Null for captures from agents older than v0.5.1. */
+  monitor_index?: number | null
 }
 
 export type Report = {
