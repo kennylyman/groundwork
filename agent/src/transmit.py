@@ -1,9 +1,10 @@
 import os
-import json
 from datetime import datetime, timezone
-from pathlib import Path
 
 import requests
+
+import capture_queue
+from groundwork_logging import get_logger
 
 
 def _utc_iso() -> str:
@@ -12,7 +13,6 @@ def _utc_iso() -> str:
     agent host's local timezone."""
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
-QUEUE_FILE = Path(os.environ.get('APPDATA', '.')) / 'Groundwork' / 'transmit_queue.json'
 
 # Server-side ingestion endpoint. Replaces the direct anon-key POST to
 # Supabase. Override with GROUNDWORK_CAPTURES_URL for dev / staging.
@@ -99,95 +99,72 @@ def _post_via_supabase(payload: dict, supabase_url: str, supabase_key: str) -> r
     )
 
 
-def transmit_capture(snapshot: dict, classification: dict, session_id: str, config: dict) -> bool:
-    """Send a classified capture to the dashboard. Prefers the new
-    server-side ingestion endpoint when an install_token is present in
-    config; falls back to the legacy direct-to-Supabase REST path when
-    not (covers agents that activated before install_token was stored).
+def _try_send(payload: dict, config: dict) -> bool:
+    """Attempt one POST with the appropriate path for this config.
+    Returns True on 2xx, False on anything else (non-2xx OR network
+    error). Never raises. Used by both transmit_capture (fresh capture
+    path) and flush_queue (retry path).
 
-    Queues locally on any failure so we don't lose data."""
-    payload = _build_payload(snapshot, classification, session_id, config)
+    A 4xx is treated identically to a 5xx — both push the payload into
+    the local queue. That's slightly wasteful for genuinely-bad
+    payloads, but the queue has its own attempts/age expiry, so a 4xx
+    spiral self-cleans within MAX_ATTEMPTS retries.
+    """
+    log = get_logger()
     install_token = config.get("install_token")
     supabase_url = config.get("supabase_url")
     supabase_key = config.get("supabase_anon_key")
-
     try:
         if install_token:
             response = _post_via_server(payload, install_token)
         elif supabase_url and supabase_key:
             response = _post_via_supabase(payload, supabase_url, supabase_key)
         else:
-            return True  # local-only mode (dev)
-
+            # Local-only / dev mode — no remote configured. Treat as success
+            # so we don't pile captures into the queue forever.
+            return True
         if response.status_code in (200, 201):
             return True
-        print(f"Transmission failed: {response.status_code} {response.text}")
-        _queue_locally(payload)
+        log.warning(
+            "transmit non-2xx: HTTP %s %s",
+            response.status_code,
+            (response.text or "")[:200],
+        )
         return False
     except requests.exceptions.RequestException as e:
-        print(f"Transmission error: {e}")
-        _queue_locally(payload)
+        log.warning("transmit network error: %s: %s", type(e).__name__, e)
         return False
 
 
-def _queue_locally(payload: dict) -> None:
-    try:
-        QUEUE_FILE.parent.mkdir(parents=True, exist_ok=True)
-        queue = []
-        if QUEUE_FILE.exists():
-            queue = json.loads(QUEUE_FILE.read_text())
-        queue.append({
-            "payload": payload,
-            "queued_at": _utc_iso(),
-            "retry_count": 0,
-        })
-        QUEUE_FILE.write_text(json.dumps(queue, indent=2))
-    except Exception as e:
-        print(f"Queue write error: {e}")
+def transmit_capture(snapshot: dict, classification: dict, session_id: str, config: dict) -> bool:
+    """Send a classified capture to the dashboard.
+
+    On any failure (timeout, connection error, non-2xx response) the
+    payload is enqueued to the SQLite queue and flushed on subsequent
+    cycles. Returns True iff the live POST succeeded; queueing on
+    failure does NOT count as success — the caller still logs
+    "Transmit failed — queued locally"."""
+    payload = _build_payload(snapshot, classification, session_id, config)
+    if _try_send(payload, config):
+        return True
+    # Queue and report failure. capture_queue.enqueue() is itself
+    # defensive — it returns False rather than raising if the SQLite
+    # init never happened, so we don't compound a transmit failure
+    # with a crash.
+    capture_queue.enqueue(payload)
+    return False
 
 
-def flush_queue(config: dict) -> None:
-    """Retry queued transmissions. Call at startup and periodically.
+def flush_queue(config: dict) -> tuple[int, int]:
+    """Drain up to 5 queued captures oldest-first. Called at the top
+    of every capture cycle and at startup.
 
-    Uses the same path selection as transmit_capture — new server endpoint
-    when install_token is in config, legacy direct Supabase otherwise."""
-    if not QUEUE_FILE.exists():
-        return
-    install_token = config.get("install_token")
-    supabase_url = config.get("supabase_url")
-    supabase_key = config.get("supabase_anon_key")
-    if not install_token and not (supabase_url and supabase_key):
-        return
+    Returns (sent, dropped) so the caller can log progress / surface
+    stuck queues. Never raises."""
+    def _transmit(payload: dict) -> bool:
+        return _try_send(payload, config)
 
-    try:
-        queue = json.loads(QUEUE_FILE.read_text())
-        if not queue:
-            return
-
-        print(f"Flushing {len(queue)} queued captures...")
-        remaining = []
-        for item in queue:
-            try:
-                if install_token:
-                    response = _post_via_server(item["payload"], install_token)
-                else:
-                    response = _post_via_supabase(
-                        item["payload"], supabase_url, supabase_key
-                    )
-                if response.status_code not in (200, 201):
-                    item["retry_count"] = item.get("retry_count", 0) + 1
-                    if item["retry_count"] < 5:
-                        remaining.append(item)
-            except Exception:
-                item["retry_count"] = item.get("retry_count", 0) + 1
-                if item["retry_count"] < 5:
-                    remaining.append(item)
-
-        QUEUE_FILE.write_text(json.dumps(remaining, indent=2))
-        if remaining:
-            print(f"{len(remaining)} captures still queued for retry")
-    except Exception as e:
-        print(f"Queue flush error: {e}")
+    return capture_queue.flush(_transmit)
 
 
 def create_session(config: dict) -> str:
@@ -205,7 +182,7 @@ def create_session(config: dict) -> str:
     try:
         response = requests.post(
             f"{supabase_url}/rest/v1/sessions",
-            headers={**_headers(supabase_key), "Prefer": "return=representation"},
+            headers={**_supabase_headers(supabase_key), "Prefer": "return=representation"},
             json=payload,
             timeout=10,
         )
@@ -226,7 +203,7 @@ def end_session(session_id: str, total_captures: int, config: dict) -> None:
     try:
         requests.patch(
             f"{supabase_url}/rest/v1/sessions?id=eq.{session_id}",
-            headers=_headers(supabase_key),
+            headers=_supabase_headers(supabase_key),
             json={
                 "status": "completed",
                 "total_captures": total_captures,

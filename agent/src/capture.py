@@ -1,43 +1,31 @@
 import mss
 import mss.tools
 import base64
-import os
 import time
 import threading
 from datetime import datetime, timezone
-from pathlib import Path
 from PIL import Image
 import io
 import subprocess
 import platform
 
+from groundwork_logging import get_logger
 
-# ---- Logging ---------------------------------------------------------------
-#
-# capture.py can fail in ways main.py won't see — mss raising during a
-# screen-share, BitBlt returning a blanked frame, a monitor unplugged
-# mid-grab. Each of those needs to land in groundwork.log next to the
-# main loop's entries. We duplicate main.py's log() target rather than
-# threading a callback in, so this module stays standalone-runnable
-# (`python -m capture` for smoke tests still writes to the same file).
-_CONFIG_DIR = Path(os.environ.get('APPDATA', '.')) / 'Groundwork'
-_LOG_FILE = _CONFIG_DIR / 'groundwork.log'
+
+# Shared logger — main.py calls configure_logging() at startup; capture
+# events land in the same RotatingFileHandler as main loop events. If
+# capture is imported standalone for smoke tests, get_logger() returns
+# an unconfigured logger and .info()/.warning() calls become no-ops.
+_logger = get_logger()
 
 
 def _log(msg: str) -> None:
-    line = f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] {msg}"
-    try:
-        print(line)
-    except Exception:
-        # PyInstaller --windowed sets stdout to None on Windows.
-        pass
-    try:
-        _CONFIG_DIR.mkdir(parents=True, exist_ok=True)
-        with open(_LOG_FILE, 'a') as f:
-            f.write(line + '\n')
-    except Exception:
-        # Logging must never raise — capture loop relies on it.
-        pass
+    """Compatibility shim around the shared logger so existing call
+    sites in this module keep working. Routes to logger.info(); the
+    capture pipeline's "skipping cycle" lines are informational, not
+    errors (the operator-actionable signal is logged at WARNING by the
+    main loop when it hits the consecutive-failures threshold)."""
+    _logger.info(msg)
 
 
 # Threshold below which an entire frame is considered "blanked" — every

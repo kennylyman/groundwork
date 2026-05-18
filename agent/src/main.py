@@ -10,6 +10,9 @@ from pathlib import Path
 import requests
 import pytz
 
+import capture_queue
+from groundwork_logging import configure_logging, get_logger
+
 try:
     from _version import VERSION
 except Exception:
@@ -22,6 +25,7 @@ CONFIG_DIR = Path(os.environ.get('APPDATA', '.')) / 'Groundwork'
 CONFIG_DIR.mkdir(parents=True, exist_ok=True)
 LOG_FILE = CONFIG_DIR / 'groundwork.log'
 CONFIG_FILE = CONFIG_DIR / 'config.json'
+QUEUE_DB = CONFIG_DIR / 'queue.db'
 
 ACTIVATION_URL = os.environ.get(
     'GROUNDWORK_ACTIVATION_URL',
@@ -50,17 +54,25 @@ DEFAULT_CAPTURE_HOURS = {
 }
 
 
+# Configure the shared logger once. Idempotent — capture.py / transmit.py /
+# capture_queue.py all call get_logger() and land in the same rotating file.
+# Wrapped in try/except so a corrupt log dir never stops the agent from
+# running; if configure_logging itself crashed (and it has its own internal
+# try/except so this shouldn't happen), log() calls degrade to no-ops.
+try:
+    configure_logging(LOG_FILE)
+except Exception:
+    pass
+
+
 def log(msg: str) -> None:
-    line = f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] {msg}"
-    # PyInstaller --windowed sets sys.stdout to None on Windows; print() would crash.
+    """Compatibility shim — most call sites in this file predate the
+    logging.Logger refactor. Routes informational lines through
+    logger.info()."""
     try:
-        print(line)
+        get_logger().info(msg)
     except Exception:
-        pass
-    try:
-        with open(LOG_FILE, 'a') as f:
-            f.write(line + '\n')
-    except Exception:
+        # Spec contract: logging must never crash the agent.
         pass
 
 
@@ -289,17 +301,54 @@ def install_to_startup() -> bool:
             try:
                 existing, _ = winreg.QueryValueEx(key, value_name)
                 if existing == exe_path:
-                    log(f"Startup entry already set: {exe_path}")
+                    log("startup registration already present")
                     return True
-                log(f"Updating startup entry: {existing!r} -> {exe_path!r}")
+                log(f"updating startup registration: {existing!r} -> {exe_path!r}")
             except FileNotFoundError:
-                log(f"Adding startup entry: {exe_path}")
+                pass
             winreg.SetValueEx(key, value_name, 0, winreg.REG_SZ, exe_path)
+            log(f"registered Groundwork for startup on login ({exe_path})")
             return True
     except Exception as e:
         # Non-fatal — we still want the agent to run this session even if
         # the startup hook fails.
         log(f"Could not write HKCU Run entry: {e}")
+        return False
+
+
+def uninstall_from_startup() -> bool:
+    """Remove the HKCU Run entry. Called via the --uninstall CLI flag
+    when the user is intentionally removing Groundwork. Safe to call
+    when the entry doesn't exist (returns True). Returns False on
+    Windows when the registry write itself fails."""
+    if sys.platform != 'win32':
+        log("Skipping startup uninstall (not Windows)")
+        return False
+    try:
+        import winreg  # stdlib on Windows
+    except ImportError as e:
+        log(f"winreg unavailable: {e}")
+        return False
+
+    run_key = r"Software\Microsoft\Windows\CurrentVersion\Run"
+    value_name = "Groundwork"
+
+    try:
+        with winreg.OpenKey(
+            winreg.HKEY_CURRENT_USER,
+            run_key,
+            0,
+            winreg.KEY_SET_VALUE,
+        ) as key:
+            try:
+                winreg.DeleteValue(key, value_name)
+                log("removed Groundwork startup registration")
+                return True
+            except FileNotFoundError:
+                log("no startup registration to remove")
+                return True
+    except Exception as e:
+        log(f"Could not remove HKCU Run entry: {e}")
         return False
 
 
@@ -510,7 +559,16 @@ def run_capture_loop(config: dict) -> None:
     start_input_listeners()
     log("Input listeners started")
 
-    flush_queue(config)
+    # One-shot startup drain: backlog from a prior session goes out
+    # before the new session_id is minted so historical captures keep
+    # their original session attribution rather than landing under the
+    # new one. Per-cycle flush inside the loop handles the steady state.
+    try:
+        sent, dropped = flush_queue(config)
+        if sent or dropped:
+            log(f"startup queue flush: sent={sent} dropped={dropped} remaining={capture_queue.depth()}")
+    except Exception as e:
+        log(f"startup queue flush error: {type(e).__name__}: {e}")
 
     session_id = str(uuid.uuid4())
     log(f"Session: {session_id}")
@@ -540,6 +598,19 @@ def run_capture_loop(config: dict) -> None:
 
     while True:
         try:
+            # Drain up to 5 queued captures oldest-first BEFORE taking a
+            # new screenshot. Keeps a backlog moving every cycle without
+            # creating long stalls (5 × ~1s = ~5s worst-case before the
+            # fresh capture starts). Both sent/dropped counts are non-
+            # zero only when there's actual queue activity, so steady-
+            # state runs stay quiet in the log.
+            try:
+                sent, dropped = flush_queue(config)
+                if sent or dropped:
+                    log(f"queue flush: sent={sent} dropped={dropped} remaining={capture_queue.depth()}")
+            except Exception as e:
+                log(f"queue flush error: {type(e).__name__}: {e}")
+
             # Re-fetch capture-hours config periodically so owner changes
             # made in /settings/profile propagate without restart. Soft —
             # any failure keeps the cached value.
@@ -676,11 +747,39 @@ def _maybe_hard_update(config: dict) -> None:
 
 
 def main() -> None:
+    # --uninstall path: remove the Windows startup registration and exit.
+    # The clean shutdown hook for an intentional uninstall — a future
+    # uninstaller (or a tech-support runbook) calls `Groundwork.exe
+    # --uninstall` and the agent removes itself from HKCU\Run before
+    # exiting. We don't wire this to signal handlers / atexit because
+    # that would unregister on every Windows shutdown — defeats the
+    # purpose of auto-launch on next login.
+    if "--uninstall" in sys.argv[1:]:
+        log("=" * 60)
+        log(f"Groundwork uninstall (agent v{VERSION})")
+        try:
+            uninstall_from_startup()
+        except Exception as e:
+            log(f"uninstall error: {e}")
+        sys.exit(0)
+
     log("=" * 60)
     log(f"Groundwork starting (agent v{VERSION})...")
     log(f"Python: {sys.version}")
     log(f"Executable: {sys.executable}")
     log(f"Config dir: {CONFIG_DIR}")
+
+    # Initialize the local capture queue. Wrapped defensively — if
+    # SQLite init fails (locked file, permissions, corrupt db), enqueue/
+    # flush operations no-op and the agent runs without retry-on-failure
+    # backing. Spec: queue init must never crash the agent.
+    try:
+        if capture_queue.init(QUEUE_DB):
+            log(f"capture queue: {capture_queue.depth()} items pending")
+        else:
+            log("capture queue init failed — running without local queue")
+    except Exception as e:
+        log(f"capture queue init exception: {type(e).__name__}: {e}")
 
     load_env_fallbacks()
 
