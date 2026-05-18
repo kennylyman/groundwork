@@ -8,6 +8,7 @@ from datetime import datetime
 from pathlib import Path
 
 import requests
+import pytz
 
 try:
     from _version import VERSION
@@ -40,10 +41,12 @@ CAPTURE_HOURS_REFRESH_SECONDS = 3600
 
 # Defaults applied when the server is unreachable or returns garbage. Match
 # the server-side defaults in lib/capture-hours.ts.
+DEFAULT_TIMEZONE = "America/Los_Angeles"
 DEFAULT_CAPTURE_HOURS = {
     "days": ["mon", "tue", "wed", "thu", "fri"],
     "start_time": "08:00",
     "end_time": "18:00",
+    "timezone": DEFAULT_TIMEZONE,
 }
 
 
@@ -346,11 +349,18 @@ def _fetch_capture_hours(install_token: str | None) -> dict | None:
         days = body.get("days")
         start_time = body.get("start_time")
         end_time = body.get("end_time")
+        timezone = body.get("timezone")
         if not isinstance(days, list) or not all(isinstance(d, str) for d in days):
             return None
         if not isinstance(start_time, str) or not isinstance(end_time, str):
             return None
-        return {"days": days, "start_time": start_time, "end_time": end_time}
+        # Timezone is optional in the response (pre-0019 rows / very old
+        # servers) — _resolve_business_timezone applies the LA default
+        # when missing.
+        out = {"days": days, "start_time": start_time, "end_time": end_time}
+        if isinstance(timezone, str) and timezone:
+            out["timezone"] = timezone
+        return out
     except requests.exceptions.RequestException as e:
         log(f"capture-hours fetch network error: {e}")
         return None
@@ -359,8 +369,34 @@ def _fetch_capture_hours(install_token: str | None) -> dict | None:
         return None
 
 
+def _resolve_business_timezone(hours: dict) -> "pytz.tzinfo.BaseTzInfo":
+    """Resolve the timezone string in the hours dict to a pytz tzinfo
+    object. Falls back to America/Los_Angeles on missing or invalid
+    values and logs a warning so the operator can spot misconfigured
+    rows. Never raises."""
+    tz_name = None
+    if isinstance(hours, dict):
+        candidate = hours.get("timezone")
+        if isinstance(candidate, str) and candidate:
+            tz_name = candidate
+    try:
+        if tz_name:
+            return pytz.timezone(tz_name)
+    except pytz.UnknownTimeZoneError:
+        log(f"capture-hours: unknown timezone {tz_name!r} — falling back to {DEFAULT_TIMEZONE}")
+    return pytz.timezone(DEFAULT_TIMEZONE)
+
+
 def _is_within_business_hours(hours: dict, now: datetime | None = None) -> bool:
-    """True iff the current local time is inside the configured window.
+    """True iff the current time IN THE BUSINESS TIMEZONE is inside the
+    configured window.
+
+    The owner sets hours in their own timezone (e.g. 8 AM-6 PM PT).
+    Remote employees in other zones get the same wall-clock window
+    relative to the business — an employee in NY sees agents stop at
+    8 AM ET = 5 AM PT, which is what the owner expects (the business
+    is closed at 5 AM their time, regardless of where the employee is).
+
     Defensive: any malformed hours dict returns True so we don't
     accidentally silence the agent. Garbage settings shouldn't stop work."""
     if not isinstance(hours, dict):
@@ -368,7 +404,16 @@ def _is_within_business_hours(hours: dict, now: datetime | None = None) -> bool:
     days = hours.get("days")
     if not isinstance(days, list):
         return True
-    now = now or datetime.now()
+
+    tz = _resolve_business_timezone(hours)
+    now = now or datetime.now(tz)
+    # If a naive datetime was passed in (e.g. by tests), localize it to
+    # the business timezone. pytz's preferred API for naive -> aware.
+    if now.tzinfo is None:
+        now = tz.localize(now)
+    else:
+        now = now.astimezone(tz)
+
     day_abbrev = now.strftime("%a").lower()
     if day_abbrev not in days:
         return False

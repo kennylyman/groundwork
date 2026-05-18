@@ -19,16 +19,25 @@ export const ALL_DAYS: CaptureDay[] = ['mon', 'tue', 'wed', 'thu', 'fri', 'sat',
 export type CaptureHours = {
   /** Days when capture is enabled. Empty = capture never runs. */
   days: CaptureDay[]
-  /** HH:MM in 24h local time. Inclusive lower bound. */
+  /** HH:MM in 24h local time WITHIN THE BUSINESS TIMEZONE. */
   start_time: string
-  /** HH:MM in 24h local time. Exclusive upper bound. */
+  /** HH:MM in 24h local time WITHIN THE BUSINESS TIMEZONE. */
   end_time: string
+  /** IANA timezone identifier (e.g. "America/Los_Angeles"). The agent
+   *  converts the employee's machine time into this zone before
+   *  comparing against start/end. Default = America/Los_Angeles. */
+  timezone: string
 }
+
+/** Default timezone — chosen because it's CK's. Easy to switch later if
+ *  we want to localize per-account. */
+export const DEFAULT_TIMEZONE = 'America/Los_Angeles'
 
 export const DEFAULT_CAPTURE_HOURS: CaptureHours = {
   days: ['mon', 'tue', 'wed', 'thu', 'fri'],
   start_time: '08:00',
   end_time: '18:00',
+  timezone: DEFAULT_TIMEZONE,
 }
 
 const TIME_RE = /^([01]\d|2[0-3]):[0-5]\d$/
@@ -50,6 +59,21 @@ export function timeToMinutes(s: string): number {
   return h * 60 + m
 }
 
+/** Light IANA timezone validation. We don't ship a full list — we
+ *  defer to Intl.DateTimeFormat for the "is this a real zone?" check,
+ *  which the runtime supports across node 24 + modern browsers. Any
+ *  string that DateTimeFormat rejects falls back to the default. */
+export function isValidTimezone(tz: unknown): tz is string {
+  if (typeof tz !== 'string' || tz.length === 0) return false
+  try {
+    // Constructing a DateTimeFormat with an invalid tz throws.
+    new Intl.DateTimeFormat('en-US', { timeZone: tz })
+    return true
+  } catch {
+    return false
+  }
+}
+
 /** Parse a possibly-malformed jsonb value into a valid CaptureHours,
  *  falling back to defaults for anything that doesn't parse cleanly.
  *  Callers (UI + API) can rely on the return being structurally valid. */
@@ -65,12 +89,15 @@ export function parseCaptureHours(raw: unknown): CaptureHours {
   const end_time = isValidTime(obj.end_time)
     ? obj.end_time
     : DEFAULT_CAPTURE_HOURS.end_time
+  const timezone = isValidTimezone(obj.timezone)
+    ? obj.timezone
+    : DEFAULT_TIMEZONE
   // Defensive: if end is before start, fall back to default (a 0-duration
   // window would mean "agents never capture" which is rarely intentional).
   if (timeToMinutes(end_time) <= timeToMinutes(start_time)) {
     return DEFAULT_CAPTURE_HOURS
   }
-  return { days, start_time, end_time }
+  return { days, start_time, end_time, timezone }
 }
 
 /** Validate a payload incoming on PATCH from the settings UI. Returns
@@ -99,8 +126,18 @@ export function validateCaptureHoursPayload(
   if (timeToMinutes(obj.end_time) <= timeToMinutes(obj.start_time)) {
     return { ok: false, error: 'end_time must be after start_time' }
   }
+  // timezone is required on PATCH so PATCH callers can't drop it
+  // accidentally and revert to the default.
+  if (!isValidTimezone(obj.timezone)) {
+    return { ok: false, error: 'timezone must be a valid IANA identifier (e.g. America/Los_Angeles)' }
+  }
   return {
     ok: true,
-    value: { days, start_time: obj.start_time, end_time: obj.end_time },
+    value: {
+      days,
+      start_time: obj.start_time,
+      end_time: obj.end_time,
+      timezone: obj.timezone,
+    },
   }
 }
