@@ -10,6 +10,8 @@ import {
   CheckCircle,
   Clock,
   ExternalLink,
+  Trash2,
+  Loader2,
 } from 'lucide-react'
 
 const ROLES = [
@@ -32,6 +34,8 @@ export default function TeamSettingsPage() {
   const [loading, setLoading] = useState(true)
   const [adding, setAdding] = useState(false)
   const [sending, setSending] = useState<string | null>(null)
+  const [deleting, setDeleting] = useState<string | null>(null)
+  const [error, setError] = useState<string | null>(null)
   const [showForm, setShowForm] = useState(false)
   const [newEmp, setNewEmp] = useState({ name: '', role: '', email: '' })
 
@@ -102,6 +106,39 @@ export default function TeamSettingsPage() {
     }
   }
 
+  async function deleteEmployee(emp: Employee) {
+    // Owner row is the anchor for the business — server refuses too, but
+    // the UI shouldn't even offer the affordance.
+    if ((emp.role ?? '').trim().toLowerCase() === 'owner') return
+
+    const ok = window.confirm(
+      `Are you sure you want to remove ${emp.name} from the team?\n\nThis deletes their captures, opportunities, and role profile. There's no undo.`
+    )
+    if (!ok) return
+
+    setDeleting(emp.id)
+    setError(null)
+    // Optimistic remove — snapshot prior state so we can roll back on failure.
+    const prior = employees
+    setEmployees((current) => current.filter((e) => e.id !== emp.id))
+
+    try {
+      const r = await fetch(`/api/employee/${emp.id}`, { method: 'DELETE' })
+      if (!r.ok) {
+        const body = await r.json().catch(() => ({}))
+        throw new Error(body.error || `HTTP ${r.status}`)
+      }
+      // Success — keep optimistic state.
+    } catch (err) {
+      const message = err instanceof Error ? err.message : 'unknown error'
+      setError(`Could not remove ${emp.name}: ${message}`)
+      // Roll back the optimistic delete.
+      setEmployees(prior)
+    } finally {
+      setDeleting(null)
+    }
+  }
+
   if (loading) {
     return (
       <div className="bg-white rounded-2xl border border-gray-200 p-10 text-center">
@@ -112,6 +149,19 @@ export default function TeamSettingsPage() {
 
   return (
     <div className="space-y-6">
+      {error && (
+        <div className="flex items-start gap-2 px-4 py-3 bg-red-50 border border-red-100 rounded-xl text-sm text-red-700">
+          <span className="flex-1 break-all">{error}</span>
+          <button
+            type="button"
+            onClick={() => setError(null)}
+            className="text-red-700 hover:text-red-900 text-xs shrink-0"
+          >
+            Dismiss
+          </button>
+        </div>
+      )}
+
       <div className="bg-white rounded-2xl border border-gray-200">
         <div className="px-6 py-4 border-b border-gray-100 flex items-center justify-between gap-4">
           <div className="flex items-center gap-2">
@@ -205,7 +255,7 @@ export default function TeamSettingsPage() {
                 <ExternalLink className="w-3 h-3 text-gray-300 group-hover:text-gray-500 ml-1" />
               </Link>
 
-              <div className="shrink-0">
+              <div className="shrink-0 flex items-center gap-2">
                 {emp.invite_sent_at ? (
                   <div className="flex items-center gap-1.5 text-xs text-green-600 bg-green-50 border border-green-100 px-3 py-1.5 rounded-lg">
                     <CheckCircle className="w-3.5 h-3.5" />
@@ -227,6 +277,26 @@ export default function TeamSettingsPage() {
                         <Mail className="w-3.5 h-3.5" />
                         Send invite
                       </>
+                    )}
+                  </button>
+                )}
+
+                {/* Delete — hidden for the Owner row so we can't remove
+                    the business anchor. Confirmation handled inline by
+                    window.confirm in the click handler. */}
+                {(emp.role ?? '').trim().toLowerCase() !== 'owner' && (
+                  <button
+                    type="button"
+                    onClick={() => deleteEmployee(emp)}
+                    disabled={deleting === emp.id}
+                    title={`Remove ${emp.name} from the team`}
+                    aria-label={`Remove ${emp.name} from the team`}
+                    className="flex items-center justify-center w-8 h-8 text-red-500 border border-red-200 rounded-lg hover:bg-red-50 hover:text-red-700 disabled:opacity-50"
+                  >
+                    {deleting === emp.id ? (
+                      <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                    ) : (
+                      <Trash2 className="w-3.5 h-3.5" />
                     )}
                   </button>
                 )}
