@@ -113,12 +113,22 @@ export const TOOL_REGISTRY: ToolDefinition[] = [
   },
   // Microsoft 365 is the unified-OAuth registry entry — one connection
   // covers Outlook (email + calendar), Teams (chat + meetings),
-  // SharePoint (files), and OneDrive. We deliberately leave detect
-  // patterns empty here so normalizeToolName keeps mapping captures to
-  // the granular tools above (outlook / teams). The native adapter's
-  // matchesCapture() does its own M365-surface detection across all
-  // four products and pulls enrichment from Microsoft Graph regardless
-  // of which surface the capture lands on.
+  // SharePoint (files), and OneDrive. We keep detect substrings very
+  // narrow: only the literal suite name "microsoft 365" (with space +
+  // digit). Real captures say "Microsoft Teams", "Microsoft Outlook",
+  // "Microsoft Excel (via Teams)" — none of which contain the substring
+  // "microsoft 365", so they still fall through to the granular tools
+  // below (teams / outlook). The native adapter's matchesCapture() does
+  // its own M365-surface detection across all four products and pulls
+  // enrichment from Microsoft Graph regardless of which surface the
+  // capture lands on.
+  //
+  // Why this entry needs ANY detect at all: intake tool_stack entries
+  // come through as raw owner-typed strings like "Microsoft 365". Without
+  // a substring here, normalizeToolName falls back to the lowercased
+  // string ("microsoft 365" with a space), which doesn't match this
+  // canonical id ('microsoft-365' with a hyphen) and the suite leaks into
+  // "Other tools detected" with a misleading "Connect via Zapier" CTA.
   {
     id: 'microsoft-365',
     label: 'Microsoft 365',
@@ -133,15 +143,17 @@ export const TOOL_REGISTRY: ToolDefinition[] = [
       'document.create',
       'document.review',
     ],
-    detect: { windowSubstrings: [], urlSubstrings: [] },
+    detect: { windowSubstrings: ['microsoft 365', 'office 365'], urlSubstrings: ['portal.office.com', 'office.com'] },
     ring2Available: true,
     ring3Available: true,
   },
   // Google Workspace — same pattern as Microsoft 365. One OAuth covers
-  // Gmail, Calendar, Drive (and Docs/Sheets/Slides through Drive). Detect
-  // patterns stay empty so per-product detection (gmail, google-drive,
-  // google-calendar) still works in normalizeToolName; the adapter's
-  // matchesCapture() unifies across all Google surfaces.
+  // Gmail, Calendar, Drive (and Docs/Sheets/Slides through Drive). The
+  // detect substrings are intentionally narrow ("google workspace",
+  // "g suite") so per-product captures ("Gmail", "Google Drive",
+  // "Google Calendar") still match the granular tools below; the
+  // adapter's matchesCapture() unifies across all Google surfaces for
+  // enrichment.
   {
     id: 'google-workspace',
     label: 'Google Workspace',
@@ -155,7 +167,7 @@ export const TOOL_REGISTRY: ToolDefinition[] = [
       'document.create',
       'document.review',
     ],
-    detect: { windowSubstrings: [], urlSubstrings: [] },
+    detect: { windowSubstrings: ['google workspace', 'g suite', 'gsuite'], urlSubstrings: ['workspace.google.com', 'admin.google.com'] },
     ring2Available: true,
     ring3Available: true,
   },

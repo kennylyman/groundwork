@@ -90,10 +90,19 @@ export async function GET(request: NextRequest) {
       .sort((a, b) => b.capture_count_7d - a.capture_count_7d)
 
     // --- Tools from intake profile ---
+    // Intake tool_stack names are raw owner-typed strings ("Microsoft 365",
+    // "Google Workspace", "Comfort Keepers"). normalizeToolName matches
+    // them against the registry; when nothing matches we fall back to a
+    // canonicalized id (lowercase, spaces → hyphens) so the id matches
+    // the hyphenated form used everywhere else. Without canonicalization,
+    // "Microsoft 365" would have become "microsoft 365" (with a space)
+    // and slipped past nativeToolIds.has('microsoft-365') checks — see
+    // the registry comment on the microsoft-365 entry for context.
     type ToolStackEntry = { name: string; used_for?: string[] }
     const intakeStack = (profileRes.data?.tool_stack as ToolStackEntry[] | undefined) ?? []
     const intakeTools = intakeStack.map((t) => {
-      const norm = normalizeToolName(t.name) || t.name.toLowerCase()
+      const fallback = t.name.toLowerCase().replace(/\s+/g, '-')
+      const norm = normalizeToolName(t.name) || fallback
       return {
         tool_id: norm,
         tool_label: TOOL_BY_ID[norm]?.label || t.name,
