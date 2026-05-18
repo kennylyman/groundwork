@@ -1,13 +1,54 @@
 import mss
 import mss.tools
 import base64
+import os
 import time
 import threading
 from datetime import datetime, timezone
+from pathlib import Path
 from PIL import Image
 import io
 import subprocess
 import platform
+
+
+# ---- Logging ---------------------------------------------------------------
+#
+# capture.py can fail in ways main.py won't see — mss raising during a
+# screen-share, BitBlt returning a blanked frame, a monitor unplugged
+# mid-grab. Each of those needs to land in groundwork.log next to the
+# main loop's entries. We duplicate main.py's log() target rather than
+# threading a callback in, so this module stays standalone-runnable
+# (`python -m capture` for smoke tests still writes to the same file).
+_CONFIG_DIR = Path(os.environ.get('APPDATA', '.')) / 'Groundwork'
+_LOG_FILE = _CONFIG_DIR / 'groundwork.log'
+
+
+def _log(msg: str) -> None:
+    line = f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] {msg}"
+    try:
+        print(line)
+    except Exception:
+        # PyInstaller --windowed sets stdout to None on Windows.
+        pass
+    try:
+        _CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+        with open(_LOG_FILE, 'a') as f:
+            f.write(line + '\n')
+    except Exception:
+        # Logging must never raise — capture loop relies on it.
+        pass
+
+
+# Threshold below which an entire frame is considered "blanked" — every
+# RGB channel must max out at ≤ this value. A real dark UI always has
+# at least some bright pixels (cursor, badges, anti-aliased text). A
+# protected-content lock from Teams/Zoom screen-share returns a
+# uniformly black or near-black frame, which is what we're detecting
+# here. Sending that to Claude wastes API tokens AND produces useless
+# classifications ("a black rectangle, no content visible").
+_BLACK_FRAME_THRESHOLD = 5
+
 
 # Cross-platform input tracking
 keystroke_count = 0
@@ -118,39 +159,94 @@ def _detect_active_monitor_index(sct) -> int:
         return 1
 
 
-def capture_screenshot() -> tuple[str, int]:
-    """Capture the monitor containing the active window, return
-    (base64 PNG, monitor index). Index is the mss monitors[] index
-    (1 = primary, 2+ = additional monitors). Always falls back to
-    primary on detection failure."""
-    with mss.mss() as sct:
-        monitor_index = _detect_active_monitor_index(sct)
-        # Defensive: mss.monitors[] is mutable across calls; the
-        # detector returned an index that should be valid for this sct,
-        # but be paranoid in case a monitor was unplugged between
-        # detection and grab.
-        try:
-            monitor = sct.monitors[monitor_index]
-        except (IndexError, KeyError):
-            monitor_index = 1
-            monitor = sct.monitors[1]
+def capture_screenshot() -> tuple[str, int] | None:
+    """Capture the monitor containing the active window. Returns
+    (base64 PNG, monitor_index) on success, None on failure.
 
-        screenshot = sct.grab(monitor)
-        img = Image.frombytes("RGB", screenshot.size, screenshot.rgb)
+    Failure modes that return None instead of raising:
 
-        # Resize to reduce API payload — 1280px wide max
-        max_width = 1280
-        if img.width > max_width:
-            ratio = max_width / img.width
-            new_height = int(img.height * ratio)
-            img = img.resize((max_width, new_height), Image.LANCZOS)
+      - mss.grab() raises an exception. Common Windows triggers:
+        BitBlt access denied while another app holds the screen-share
+        lock (Teams, Zoom, GoToMeeting); a monitor unplugged mid-grab;
+        antivirus / EDR interfering with the screen-capture syscalls.
 
-        buffer = io.BytesIO()
-        img.save(buffer, format="PNG", optimize=True)
-        return (
-            base64.b64encode(buffer.getvalue()).decode("utf-8"),
-            monitor_index,
+      - The grabbed frame is uniformly black (every RGB channel maxes
+        out at ≤ _BLACK_FRAME_THRESHOLD). Windows produces these when
+        protected-content / DRM screen-share is active. Sending them to
+        Claude wastes API tokens and produces garbage classifications,
+        so we skip the cycle.
+
+      - Any unexpected exception inside the mss context (PIL frombytes
+        on a weird buffer shape, encoder errors, etc.).
+
+    Errors are logged with timestamp + exception type + message to
+    groundwork.log. The main loop treats None as "skip this cycle":
+    no classify, no transmit, sleep normally and try again.
+
+    Index is the mss monitors[] index (1 = primary, 2+ = additional).
+    """
+    try:
+        with mss.mss() as sct:
+            monitor_index = _detect_active_monitor_index(sct)
+            # Defensive: mss.monitors[] is mutable across calls; the
+            # detector returned an index that should be valid for this
+            # sct, but be paranoid in case a monitor was unplugged
+            # between detection and grab.
+            try:
+                monitor = sct.monitors[monitor_index]
+            except (IndexError, KeyError):
+                monitor_index = 1
+                monitor = sct.monitors[1]
+
+            # Innermost guard: this is the call that fails during
+            # screen-share / AV interference. Treat any failure here
+            # as a cycle skip — never a process death.
+            try:
+                screenshot = sct.grab(monitor)
+            except Exception as e:
+                _log(
+                    f"screenshot grab failed: {type(e).__name__}: {e} "
+                    f"(monitor {monitor_index}) — skipping cycle"
+                )
+                return None
+
+            img = Image.frombytes("RGB", screenshot.size, screenshot.rgb)
+
+            # Protected-content / blanked-frame detection. extrema is
+            # ((rmin, rmax), (gmin, gmax), (bmin, bmax)) for RGB. If
+            # every channel maxes at near-zero, the whole frame is
+            # black — a real dark UI always has at least cursor or
+            # text highlights that push one channel above the threshold.
+            extrema = img.getextrema()
+            if all(ch[1] <= _BLACK_FRAME_THRESHOLD for ch in extrema):
+                _log(
+                    "protected content detected (uniformly black frame, "
+                    f"max channel={max(ch[1] for ch in extrema)}), skipping cycle"
+                )
+                return None
+
+            # Resize to reduce API payload — 1280px wide max
+            max_width = 1280
+            if img.width > max_width:
+                ratio = max_width / img.width
+                new_height = int(img.height * ratio)
+                img = img.resize((max_width, new_height), Image.LANCZOS)
+
+            buffer = io.BytesIO()
+            img.save(buffer, format="PNG", optimize=True)
+            return (
+                base64.b64encode(buffer.getvalue()).decode("utf-8"),
+                monitor_index,
+            )
+    except Exception as e:
+        # Outermost belt-and-suspenders for anything that escapes the
+        # inner handlers: mss() context init failure, PIL decode of a
+        # malformed buffer, encoder I/O errors. Caller still gets None.
+        _log(
+            f"screenshot pipeline failed: {type(e).__name__}: {e} "
+            "— skipping cycle"
         )
+        return None
 
 def get_active_window():
     """Get active window title cross-platform."""
@@ -220,11 +316,24 @@ def get_active_url():
 def build_context_snapshot(previous_tasks=None):
     """
     Build a full context bundle for Claude classification.
-    Returns dict with all available signals.
+    Returns dict with all available signals, or None when the
+    screenshot couldn't be taken (caller skips classify/transmit
+    for the cycle and tries again at the next interval).
+
+    Note: input counters (keystrokes/clicks/paste) are drained ONLY
+    after a successful screenshot grab. If we returned a snapshot
+    without the screenshot but with drained counters, those keystrokes
+    would be lost. By draining only on success, a failed-capture cycle
+    leaves the counters intact and they roll into the next successful
+    snapshot — important during long meetings where the user is
+    actively typing while Windows is denying screen capture.
     """
-    keystrokes, clicks, pastes = get_and_reset_counts()
     idle = get_idle_seconds()
-    screenshot_b64, monitor_index = capture_screenshot()
+    shot = capture_screenshot()
+    if shot is None:
+        return None
+    screenshot_b64, monitor_index = shot
+    keystrokes, clicks, pastes = get_and_reset_counts()
 
     snapshot = {
         # UTC with Z suffix. Supabase's captured_at column is timestamptz —
@@ -259,7 +368,11 @@ if __name__ == "__main__":
     
     print("Capturing context snapshot...")
     snapshot = build_context_snapshot()
-    
+    if snapshot is None:
+        print("Snapshot returned None (screenshot capture failed or frame was "
+              "blanked). See groundwork.log for details.")
+        raise SystemExit(1)
+
     print(f"Timestamp:     {snapshot['timestamp']}")
     print(f"Active window: {snapshot['active_window']}")
     print(f"Active URL:    {snapshot['active_url']}")

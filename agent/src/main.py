@@ -529,6 +529,14 @@ def run_capture_loop(config: dict) -> None:
     # whatever was loaded at activation and refresh after one full
     # interval (an hour).
     last_capture_hours_refresh = time.time()
+    # Track consecutive capture failures so we can surface a single,
+    # actionable warning when something keeps the agent silent for
+    # minutes during business hours — almost always Teams/Zoom
+    # screen-share or a display reconfig. Resets on every successful
+    # snapshot. Threshold = CAPTURE_FAILURE_WARN_AT cycles ≈ 2.5 min
+    # at the default 30s interval.
+    consecutive_capture_failures = 0
+    CAPTURE_FAILURE_WARN_AT = 5
 
     while True:
         try:
@@ -564,34 +572,61 @@ def run_capture_loop(config: dict) -> None:
                 log("Paused — skipping capture cycle")
             else:
                 snapshot = build_context_snapshot(previous_tasks=recent_tasks[-5:])
-                log(f"Snapshot taken: {snapshot.get('active_window')}")
+                if snapshot is None:
+                    # capture.py already logged the specific reason
+                    # (grab raised, blanked frame, pipeline error). We
+                    # just track the streak here and surface one warning
+                    # at the threshold so an owner triaging "agent went
+                    # quiet" has an actionable signal in groundwork.log.
+                    consecutive_capture_failures += 1
+                    if consecutive_capture_failures == CAPTURE_FAILURE_WARN_AT:
+                        minutes = (CAPTURE_FAILURE_WARN_AT * CAPTURE_INTERVAL) / 60
+                        log(
+                            f"agent capturing nothing for {minutes:.1f} minutes "
+                            f"({consecutive_capture_failures} consecutive failures) "
+                            "— possible screen share or display issue"
+                        )
+                else:
+                    if consecutive_capture_failures >= CAPTURE_FAILURE_WARN_AT:
+                        log(
+                            "capture recovered after "
+                            f"{consecutive_capture_failures} consecutive failures"
+                        )
+                    consecutive_capture_failures = 0
+                    log(f"Snapshot taken: {snapshot.get('active_window')}")
 
-                classification = classify_snapshot(
-                    snapshot,
-                    config['anthropic_api_key'],
-                    business_context=config.get('business_context'),
-                    role_context=config.get('role_context'),
-                    capabilities=config.get('capabilities'),
-                )
-                task = classification.get('task', 'unknown')
-                confidence = classification.get('confidence', 0)
-                log(f"Classified: {task} ({confidence}%)")
-                recent_tasks.append(task)
+                    classification = classify_snapshot(
+                        snapshot,
+                        config['anthropic_api_key'],
+                        business_context=config.get('business_context'),
+                        role_context=config.get('role_context'),
+                        capabilities=config.get('capabilities'),
+                    )
+                    task = classification.get('task', 'unknown')
+                    confidence = classification.get('confidence', 0)
+                    log(f"Classified: {task} ({confidence}%)")
+                    recent_tasks.append(task)
 
-                ok = transmit_capture(snapshot, classification, session_id, config)
-                log("Transmitted" if ok else "Transmit failed — queued locally")
+                    ok = transmit_capture(snapshot, classification, session_id, config)
+                    log("Transmitted" if ok else "Transmit failed — queued locally")
 
-                # Opportunistic soft update at idle. perform_update() exits
-                # the process on success, so anything after this line only
-                # runs on no-op / failed-update paths.
-                last_soft_update_check = _maybe_soft_update(
-                    config,
-                    last_soft_update_check,
-                    snapshot.get("idle_seconds", 0),
-                )
+                    # Opportunistic soft update at idle. perform_update() exits
+                    # the process on success, so anything after this line only
+                    # runs on no-op / failed-update paths.
+                    last_soft_update_check = _maybe_soft_update(
+                        config,
+                        last_soft_update_check,
+                        snapshot.get("idle_seconds", 0),
+                    )
 
         except Exception as e:
-            log(f"Capture cycle error: {e}")
+            # Last-resort safety net. Anything that escapes the inner
+            # handlers — classify.py exceptions, transmit.py exceptions,
+            # capture-hours fetch crashes, an unexpected None deref —
+            # lands here and the loop keeps running. The agent must
+            # only exit intentionally (SystemExit on activation failure),
+            # never from an unhandled exception in steady-state.
+            log(f"Capture cycle error: {type(e).__name__}: {e}")
             log(traceback.format_exc())
 
         capture_count += 1
