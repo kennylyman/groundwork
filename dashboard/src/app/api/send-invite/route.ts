@@ -36,6 +36,34 @@ export async function POST(request: NextRequest) {
     const termsUrl = `${process.env.NEXT_PUBLIC_APP_URL}/terms`
     const businessName = employee.businesses?.name || 'your company'
 
+    // Defensive: employees table allows nulls historically; don't blow up
+    // the template literal with `.split` on undefined. Falls back to a
+    // neutral greeting if name is missing.
+    const firstName = (employee.name || '').trim().split(/\s+/)[0] || 'there'
+
+    // Plain-text alternative for clients with HTML disabled / spam-filter
+    // signal. Resend accepts `text` alongside `html` and uses HTML when
+    // available, falling back to text otherwise.
+    const text = [
+      `Hi ${firstName},`,
+      ``,
+      `We're on a mission to find every automation opportunity hiding in how we work — and eliminate the manual, repetitive tasks that eat up your day.`,
+      ``,
+      `To find them, we need a clear picture of how our team actually operates. That's what Groundwork does. It runs quietly in the background, recognizes the tools and workflows you use, and builds a map of where we can improve. From that map, we identify exactly what to automate and in what order.`,
+      ``,
+      `What it doesn't do: log keystrokes, read messages, or store screenshots. Ever. Only workflow patterns — which apps, which processes, how often.`,
+      ``,
+      `Click below to review the full data disclosure, then install in about two minutes.`,
+      ``,
+      `Review and get set up: ${installUrl}`,
+      ``,
+      `This link is unique to you and expires once used. Questions? Just reply to this email.`,
+      ``,
+      `—`,
+      `Groundwork · gwork.tech`,
+      `Data disclosure: ${termsUrl}`,
+    ].join('\n')
+
     const response = await fetch('https://api.resend.com/emails', {
       method: 'POST',
       headers: {
@@ -46,37 +74,39 @@ export async function POST(request: NextRequest) {
         from: 'Groundwork <onboarding@gwork.tech>',
         to: employee.email,
         subject: `You've been invited to Groundwork — ${businessName}`,
+        text,
         html: `
           <!DOCTYPE html>
           <html>
           <body style="margin: 0; padding: 0; background: #f9fafb; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;">
-            <div style="max-width: 480px; margin: 40px auto; padding: 0 20px;">
+            <div style="max-width: 520px; margin: 40px auto; padding: 0 20px;">
               <div style="text-align: center; margin-bottom: 32px;">
                 <span style="font-size: 18px; font-weight: 600; color: #111827;">⚡ Groundwork</span>
               </div>
               <div style="background: white; border-radius: 16px; border: 1px solid #e5e7eb; padding: 32px;">
-                <h1 style="margin: 0 0 8px; font-size: 20px; font-weight: 600; color: #111827;">Hi ${employee.name.split(' ')[0]},</h1>
-                <p style="margin: 0 0 24px; font-size: 14px; color: #6b7280; line-height: 1.6;">
-                  ${businessName} is using Groundwork to understand how the team works. You've been added as <strong>${employee.role}</strong>.
+                <h1 style="margin: 0 0 16px; font-size: 20px; font-weight: 600; color: #111827;">Hi ${firstName},</h1>
+                <p style="margin: 0 0 20px; font-size: 14px; color: #374151; line-height: 1.65;">
+                  We&rsquo;re on a mission to find every automation opportunity hiding in how we work &mdash; and eliminate the manual, repetitive tasks that eat up your day.
                 </p>
-                <p style="margin: 0 0 24px; font-size: 14px; color: #6b7280; line-height: 1.6;">
-                  Groundwork runs quietly in the background and captures a screenshot every 30 seconds to classify the kind of work you&rsquo;re doing. We do not record passwords, personal messages, or anything you type.
+                <p style="margin: 0 0 20px; font-size: 14px; color: #374151; line-height: 1.65;">
+                  To find them, we need a clear picture of how our team actually operates. That&rsquo;s what Groundwork does. It runs quietly in the background, recognizes the tools and workflows you use, and builds a map of where we can improve. From that map, we identify exactly what to automate and in what order.
                 </p>
-                <p style="margin: 0 0 24px; font-size: 14px; color: #6b7280; line-height: 1.6;">
-                  Before you install, the link below will show you the full data-collection disclosure. You&rsquo;ll need to acknowledge it once before downloading.
+                <p style="margin: 0 0 24px; font-size: 14px; color: #374151; line-height: 1.65;">
+                  <strong style="color: #111827;">What it doesn&rsquo;t do:</strong> log keystrokes, read messages, or store screenshots. Ever. Only workflow patterns &mdash; which apps, which processes, how often.
                 </p>
-                <a href="${installUrl}" style="display: block; background: #111827; color: white; text-align: center; padding: 12px 24px; border-radius: 8px; text-decoration: none; font-size: 14px; font-weight: 500; margin-bottom: 16px;">
-                  Review and install
+                <p style="margin: 0 0 24px; font-size: 14px; color: #374151; line-height: 1.65;">
+                  Click below to review the full data disclosure, then install in about two minutes.
+                </p>
+                <a href="${installUrl}" style="display: block; background: #111827; color: white; text-align: center; padding: 14px 24px; border-radius: 8px; text-decoration: none; font-size: 14px; font-weight: 500; margin-bottom: 20px;">
+                  Review and get set up &rarr;
                 </a>
-                <p style="margin: 0 0 8px; font-size: 12px; color: #9ca3af; text-align: center;">
-                  This link is unique to you. Don&rsquo;t share it with others.
-                </p>
-                <p style="margin: 0; font-size: 12px; color: #9ca3af; text-align: center;">
-                  Want the disclosure first? <a href="${termsUrl}" style="color: #6b7280; text-decoration: underline;">Read it here</a>.
+                <p style="margin: 0; font-size: 12px; color: #9ca3af; text-align: center; line-height: 1.6;">
+                  This link is unique to you and expires once used.<br/>
+                  Questions? Just reply to this email.
                 </p>
               </div>
               <p style="text-align: center; font-size: 12px; color: #9ca3af; margin-top: 24px;">
-                Groundwork · gwork.tech · <a href="${termsUrl}" style="color: #9ca3af; text-decoration: underline;">Data disclosure</a>
+                Groundwork &middot; gwork.tech &middot; <a href="${termsUrl}" style="color: #9ca3af; text-decoration: underline;">Data disclosure</a>
               </p>
             </div>
           </body>
