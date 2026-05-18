@@ -490,38 +490,7 @@ import {
   type CaptureDay,
   type CaptureHours,
 } from '@/lib/capture-hours'
-
-/** Best-effort list of IANA timezones. Modern runtimes expose the full
- *  set via Intl.supportedValuesOf; older ones (or non-browser SSR
- *  hydration) fall back to a curated US-focused list. */
-function listTimezones(): string[] {
-  type IntlExt = { supportedValuesOf?: (key: 'timeZone') => string[] }
-  const intlExt = Intl as unknown as IntlExt
-  if (typeof intlExt.supportedValuesOf === 'function') {
-    try {
-      const all = intlExt.supportedValuesOf('timeZone')
-      if (Array.isArray(all) && all.length > 0) return all
-    } catch {
-      // fall through to the curated list
-    }
-  }
-  return [
-    'America/Los_Angeles',
-    'America/Denver',
-    'America/Phoenix',
-    'America/Chicago',
-    'America/New_York',
-    'America/Anchorage',
-    'Pacific/Honolulu',
-    'America/Toronto',
-    'America/Vancouver',
-    'America/Mexico_City',
-    'Europe/London',
-    'Europe/Berlin',
-    'Europe/Paris',
-    'UTC',
-  ]
-}
+import TimezoneSelect from '@/components/ui/TimezoneSelect'
 
 const DAY_LABELS: Record<CaptureDay, string> = {
   mon: 'Mon',
@@ -672,31 +641,14 @@ function CaptureScheduleSection() {
                 className="px-3 py-2 text-sm text-gray-900 border border-gray-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-gray-900 bg-white w-32"
               />
               <span className="text-xs text-gray-500">in</span>
-              <select
+              <TimezoneSelect
                 value={hours.timezone}
-                onChange={(e) =>
-                  setHours((h) => ({ ...h, timezone: e.target.value }))
-                }
-                className="px-3 py-2 text-sm text-gray-900 border border-gray-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-gray-900 bg-white min-w-[16rem]"
-              >
-                {/* Always include the saved value as the first option in
-                    case it's an obscure zone the Intl list doesn't return
-                    on this runtime. Browser dedupes via the select model. */}
-                {!listTimezones().includes(hours.timezone) && (
-                  <option value={hours.timezone}>{hours.timezone}</option>
-                )}
-                {listTimezones().map((tz) => (
-                  <option key={tz} value={tz}>
-                    {tz}
-                  </option>
-                ))}
-              </select>
+                onChange={(tz) => setHours((h) => ({ ...h, timezone: tz }))}
+              />
             </div>
             <p className="text-[11px] text-gray-500 mt-2 leading-relaxed">
-              Times are evaluated in <span className="font-medium text-gray-700">{hours.timezone}</span>.
-              {' '}Remote employees in other timezones get the same window —
-              an 8 AM PT start means agents stop capturing at 8 AM PT
-              regardless of where the employee is.
+              Captures follow your business timezone. Remote employees worldwide
+              capture during this same window regardless of their local time.
             </p>
           </div>
 
