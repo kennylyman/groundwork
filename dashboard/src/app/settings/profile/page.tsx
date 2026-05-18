@@ -583,7 +583,8 @@ function CaptureScheduleSection() {
       <p className="text-xs text-gray-500 mb-4 leading-relaxed">
         When do the Groundwork agents run on each employee&rsquo;s machine?
         Outside these hours, no screenshots are taken and no data is sent.
-        Times are local to each employee&rsquo;s computer.
+        Times are evaluated in your selected business timezone. Remote
+        employees worldwide capture during this same window.
       </p>
 
       {loading ? (
