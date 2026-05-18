@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server'
+import { randomBytes } from 'node:crypto'
 import { serverSupabase } from '@/lib/supabase'
 import { resolveEmployeeOwner } from '@/lib/auth'
 
@@ -32,7 +33,34 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ error: 'No email on file' }, { status: 400 })
     }
 
-    const installUrl = `${process.env.NEXT_PUBLIC_APP_URL}/install/${employee.install_token}`
+    // If the previous install link was already used, rotate the token
+    // and clear the redemption so the new invite carries a working URL.
+    // Matches the DB default for install_token (32 random bytes, hex
+    // encoded). Note: any agent still running with the old token will
+    // start getting 401s on /api/captures — that's intentional, this
+    // flow exists for "employee got a new machine, replace the old
+    // install" so the old binary needs to die.
+    let installToken = employee.install_token as string
+    if (employee.install_token_redeemed_at) {
+      const newToken = randomBytes(32).toString('hex')
+      const { error: rotErr } = await supabase
+        .from('employees')
+        .update({
+          install_token: newToken,
+          install_token_redeemed_at: null,
+        })
+        .eq('id', employee.id)
+      if (rotErr) {
+        console.error('send-invite: token rotation failed', rotErr)
+        return NextResponse.json(
+          { error: 'token rotation failed', detail: rotErr.message },
+          { status: 500 }
+        )
+      }
+      installToken = newToken
+    }
+
+    const installUrl = `${process.env.NEXT_PUBLIC_APP_URL}/install/${installToken}`
     const termsUrl = `${process.env.NEXT_PUBLIC_APP_URL}/terms`
     const businessName = employee.businesses?.name || 'your company'
 

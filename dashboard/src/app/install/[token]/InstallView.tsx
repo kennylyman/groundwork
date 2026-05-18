@@ -200,9 +200,13 @@ function Installer({
         on your machine.
       </p>
 
-      {/* Download */}
+      {/* Download — goes through /api/download/{token} which atomically
+          claims redemption (install_token_redeemed_at = now()) before
+          302-redirecting to the GitHub release. Once claimed, this URL
+          stops serving the binary and the install page shows the
+          LinkUsedNotice on next load. One-shot by design. */}
       <a
-        href="https://github.com/kennylyman/groundwork/releases/latest/download/Groundwork.exe"
+        href={`/api/download/${encodeURIComponent(token)}`}
         className="block w-full bg-gray-900 text-white text-sm font-medium py-3 rounded-xl text-center hover:bg-gray-700 transition-colors mb-6"
       >
         ⬇️ Download Groundwork for Windows
