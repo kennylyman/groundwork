@@ -5,6 +5,10 @@ agent/venv/
 agent/logs/
 agent/reports/
 agent/src/__pycache__/
+# Smoke tests on macOS write to ./Groundwork/ because APPDATA isn't set;
+# the agent expects this dir on Windows only.
+agent/Groundwork/
+Groundwork/
 __pycache__/
 *.pyc
 dist/
