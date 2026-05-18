@@ -8,11 +8,26 @@ import {
   Plus,
   Mail,
   CheckCircle,
+  CheckCircle2,
   Clock,
   ExternalLink,
   Trash2,
   Loader2,
+  CalendarClock,
+  ChevronDown,
+  ChevronUp,
+  Save,
+  AlertCircle,
 } from 'lucide-react'
+import {
+  DEFAULT_CAPTURE_HOURS,
+  parseCaptureHours,
+  type CaptureHours,
+} from '@/lib/capture-hours'
+import {
+  CaptureScheduleEditor,
+  summarizeCaptureHours,
+} from '@/components/CaptureScheduleEditor'
 
 const ROLES = [
   'Owner',
@@ -31,6 +46,8 @@ type Business = { id: string; name: string }
 export default function TeamSettingsPage() {
   const [business, setBusiness] = useState<Business | null>(null)
   const [employees, setEmployees] = useState<Employee[]>([])
+  const [businessDefault, setBusinessDefault] =
+    useState<CaptureHours>(DEFAULT_CAPTURE_HOURS)
   const [loading, setLoading] = useState(true)
   const [adding, setAdding] = useState(false)
   const [sending, setSending] = useState<string | null>(null)
@@ -38,6 +55,9 @@ export default function TeamSettingsPage() {
   const [error, setError] = useState<string | null>(null)
   const [showForm, setShowForm] = useState(false)
   const [newEmp, setNewEmp] = useState({ name: '', role: '', email: '' })
+  // Which employee's schedule editor is currently expanded. Single-open
+  // model so the page doesn't get visually noisy.
+  const [expandedSchedule, setExpandedSchedule] = useState<string | null>(null)
 
   useEffect(() => {
     void load()
@@ -56,13 +76,34 @@ export default function TeamSettingsPage() {
       return
     }
     setBusiness(biz)
-    const { data: emps } = await supabase
-      .from('employees')
-      .select('*')
-      .eq('business_id', biz.id)
-      .order('created_at')
-    setEmployees(emps ?? [])
+    const [empRes, scheduleRes] = await Promise.all([
+      supabase
+        .from('employees')
+        .select('*')
+        .eq('business_id', biz.id)
+        .order('created_at'),
+      // Owner cookie path → returns the business-level schedule. Used
+      // as the "Use business default" preview/fallback for each employee.
+      fetch('/api/settings/capture', { cache: 'no-store' })
+        .then((r) => r.json())
+        .catch(() => null),
+    ])
+    setEmployees(empRes.data ?? [])
+    if (scheduleRes && typeof scheduleRes === 'object' && !scheduleRes.error) {
+      setBusinessDefault({
+        days: scheduleRes.days,
+        start_time: scheduleRes.start_time,
+        end_time: scheduleRes.end_time,
+        timezone: scheduleRes.timezone || DEFAULT_CAPTURE_HOURS.timezone,
+      })
+    }
     setLoading(false)
+  }
+
+  function updateEmployeeLocal(employeeId: string, patch: Partial<Employee>) {
+    setEmployees((emps) =>
+      emps.map((e) => (e.id === employeeId ? { ...e, ...patch } : e))
+    )
   }
 
   async function addEmployee() {
@@ -231,78 +272,119 @@ export default function TeamSettingsPage() {
         )}
 
         <div className="divide-y divide-gray-50">
-          {employees.map((emp) => (
-            <div
-              key={emp.id}
-              className="px-6 py-4 flex items-center justify-between gap-4"
-            >
-              <Link
-                href={`/employee/${emp.id}`}
-                className="flex items-center gap-3 group min-w-0 flex-1"
-              >
-                <div className="w-8 h-8 bg-gray-100 rounded-full flex items-center justify-center text-xs font-medium text-gray-600">
-                  {emp.name.split(' ').map((n) => n[0]).join('').slice(0, 2)}
-                </div>
-                <div className="min-w-0">
-                  <p className="text-sm font-medium text-gray-900 group-hover:underline">
-                    {emp.name}
-                  </p>
-                  <p className="text-xs text-gray-500 truncate">
-                    {emp.role}
-                    {emp.email && ` · ${emp.email}`}
-                  </p>
-                </div>
-                <ExternalLink className="w-3 h-3 text-gray-300 group-hover:text-gray-500 ml-1" />
-              </Link>
+          {employees.map((emp) => {
+            const scheduleOpen = expandedSchedule === emp.id
+            const hasOverride = emp.capture_hours != null
+            return (
+              <div key={emp.id}>
+                <div className="px-6 py-4 flex items-center justify-between gap-4">
+                  <Link
+                    href={`/employee/${emp.id}`}
+                    className="flex items-center gap-3 group min-w-0 flex-1"
+                  >
+                    <div className="w-8 h-8 bg-gray-100 rounded-full flex items-center justify-center text-xs font-medium text-gray-600">
+                      {emp.name.split(' ').map((n) => n[0]).join('').slice(0, 2)}
+                    </div>
+                    <div className="min-w-0">
+                      <p className="text-sm font-medium text-gray-900 group-hover:underline">
+                        {emp.name}
+                      </p>
+                      <p className="text-xs text-gray-500 truncate">
+                        {emp.role}
+                        {emp.email && ` · ${emp.email}`}
+                      </p>
+                    </div>
+                    <ExternalLink className="w-3 h-3 text-gray-300 group-hover:text-gray-500 ml-1" />
+                  </Link>
 
-              <div className="shrink-0 flex items-center gap-2">
-                {emp.invite_sent_at ? (
-                  <div className="flex items-center gap-1.5 text-xs text-green-600 bg-green-50 border border-green-100 px-3 py-1.5 rounded-lg">
-                    <CheckCircle className="w-3.5 h-3.5" />
-                    Invite sent
+                  <div className="shrink-0 flex items-center gap-2">
+                    {/* Schedule expand/collapse. Shows a "Custom" chip when
+                        the employee has an override, otherwise just an icon. */}
+                    <button
+                      type="button"
+                      onClick={() =>
+                        setExpandedSchedule(scheduleOpen ? null : emp.id)
+                      }
+                      title={
+                        hasOverride
+                          ? 'Custom schedule (click to edit)'
+                          : 'Edit schedule for this employee'
+                      }
+                      className={`flex items-center gap-1.5 text-xs font-medium px-3 py-1.5 rounded-lg border transition-colors ${
+                        hasOverride
+                          ? 'bg-indigo-50 text-indigo-700 border-indigo-100 hover:bg-indigo-100'
+                          : 'text-gray-600 border-gray-200 hover:bg-gray-50'
+                      }`}
+                    >
+                      <CalendarClock className="w-3.5 h-3.5" />
+                      {hasOverride ? 'Custom schedule' : 'Schedule'}
+                      {scheduleOpen ? (
+                        <ChevronUp className="w-3 h-3" />
+                      ) : (
+                        <ChevronDown className="w-3 h-3" />
+                      )}
+                    </button>
+
+                    {emp.invite_sent_at ? (
+                      <div className="flex items-center gap-1.5 text-xs text-green-600 bg-green-50 border border-green-100 px-3 py-1.5 rounded-lg">
+                        <CheckCircle className="w-3.5 h-3.5" />
+                        Invite sent
+                      </div>
+                    ) : (
+                      <button
+                        onClick={() => sendInvite(emp.id)}
+                        disabled={sending === emp.id}
+                        className="flex items-center gap-1.5 text-xs font-medium text-gray-600 border border-gray-200 px-3 py-1.5 rounded-lg hover:bg-gray-50 disabled:opacity-50"
+                      >
+                        {sending === emp.id ? (
+                          <>
+                            <Clock className="w-3.5 h-3.5" />
+                            Sending…
+                          </>
+                        ) : (
+                          <>
+                            <Mail className="w-3.5 h-3.5" />
+                            Send invite
+                          </>
+                        )}
+                      </button>
+                    )}
+
+                    {/* Delete — hidden for the Owner row so we can't remove
+                        the business anchor. Confirmation handled inline by
+                        window.confirm in the click handler. */}
+                    {(emp.role ?? '').trim().toLowerCase() !== 'owner' && (
+                      <button
+                        type="button"
+                        onClick={() => deleteEmployee(emp)}
+                        disabled={deleting === emp.id}
+                        title={`Remove ${emp.name} from the team`}
+                        aria-label={`Remove ${emp.name} from the team`}
+                        className="flex items-center justify-center w-8 h-8 text-red-500 border border-red-200 rounded-lg hover:bg-red-50 hover:text-red-700 disabled:opacity-50"
+                      >
+                        {deleting === emp.id ? (
+                          <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                        ) : (
+                          <Trash2 className="w-3.5 h-3.5" />
+                        )}
+                      </button>
+                    )}
                   </div>
-                ) : (
-                  <button
-                    onClick={() => sendInvite(emp.id)}
-                    disabled={sending === emp.id}
-                    className="flex items-center gap-1.5 text-xs font-medium text-gray-600 border border-gray-200 px-3 py-1.5 rounded-lg hover:bg-gray-50 disabled:opacity-50"
-                  >
-                    {sending === emp.id ? (
-                      <>
-                        <Clock className="w-3.5 h-3.5" />
-                        Sending…
-                      </>
-                    ) : (
-                      <>
-                        <Mail className="w-3.5 h-3.5" />
-                        Send invite
-                      </>
-                    )}
-                  </button>
-                )}
+                </div>
 
-                {/* Delete — hidden for the Owner row so we can't remove
-                    the business anchor. Confirmation handled inline by
-                    window.confirm in the click handler. */}
-                {(emp.role ?? '').trim().toLowerCase() !== 'owner' && (
-                  <button
-                    type="button"
-                    onClick={() => deleteEmployee(emp)}
-                    disabled={deleting === emp.id}
-                    title={`Remove ${emp.name} from the team`}
-                    aria-label={`Remove ${emp.name} from the team`}
-                    className="flex items-center justify-center w-8 h-8 text-red-500 border border-red-200 rounded-lg hover:bg-red-50 hover:text-red-700 disabled:opacity-50"
-                  >
-                    {deleting === emp.id ? (
-                      <Loader2 className="w-3.5 h-3.5 animate-spin" />
-                    ) : (
-                      <Trash2 className="w-3.5 h-3.5" />
-                    )}
-                  </button>
+                {scheduleOpen && (
+                  <EmployeeScheduleEditor
+                    key={`schedule-${emp.id}`}
+                    employee={emp}
+                    businessDefault={businessDefault}
+                    onSaved={(next) =>
+                      updateEmployeeLocal(emp.id, { capture_hours: next })
+                    }
+                  />
                 )}
               </div>
-            </div>
-          ))}
+            )
+          })}
 
           {employees.length === 0 && !showForm && (
             <div className="px-6 py-10 text-center">
@@ -315,6 +397,141 @@ export default function TeamSettingsPage() {
           )}
         </div>
       </div>
+    </div>
+  )
+}
+
+// ---------- Per-employee schedule editor ----------
+
+/**
+ * Expandable schedule editor for one employee row.
+ *
+ * Owns local state for the in-flight edit; on save, PATCH to
+ * /api/settings/capture with employee_id (+ clear=true when the toggle
+ * is back to "use business default"). Reports the final value back via
+ * onSaved so the parent can update its local employee list without a
+ * full reload.
+ */
+function EmployeeScheduleEditor({
+  employee,
+  businessDefault,
+  onSaved,
+}: {
+  employee: Employee
+  businessDefault: CaptureHours
+  onSaved: (next: CaptureHours | null) => void
+}) {
+  const hasOverride = employee.capture_hours != null
+  // useDefault === true means "follow business schedule", maps to NULL in DB.
+  const [useDefault, setUseDefault] = useState(!hasOverride)
+  // The in-flight edited hours. Seeded from the override if present,
+  // otherwise from the business default so the owner has a sensible
+  // starting point when they flip the toggle off.
+  const [hours, setHours] = useState<CaptureHours>(
+    hasOverride ? parseCaptureHours(employee.capture_hours) : businessDefault
+  )
+  const [saving, setSaving] = useState(false)
+  const [savedAt, setSavedAt] = useState<number | null>(null)
+  const [err, setErr] = useState<string | null>(null)
+
+  async function save() {
+    setSaving(true)
+    setErr(null)
+    try {
+      const body = useDefault
+        ? { employee_id: employee.id, clear: true }
+        : { employee_id: employee.id, ...hours }
+      const r = await fetch('/api/settings/capture', {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      })
+      const respBody = await r.json().catch(() => ({}))
+      if (!r.ok) throw new Error(respBody.error || `HTTP ${r.status}`)
+      setSavedAt(Date.now())
+      setTimeout(() => setSavedAt(null), 3000)
+      // Push the canonical post-save value back up. Null = inherited.
+      onSaved(useDefault ? null : hours)
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : 'save failed')
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  const defaultSummary = summarizeCaptureHours(businessDefault)
+
+  return (
+    <div className="px-6 py-5 bg-gray-50 border-t border-gray-100">
+      <div className="mb-4 flex items-start gap-3">
+        <input
+          type="checkbox"
+          id={`use-default-${employee.id}`}
+          checked={useDefault}
+          onChange={(e) => setUseDefault(e.target.checked)}
+          className="mt-0.5 w-4 h-4 accent-gray-900 cursor-pointer"
+        />
+        <label
+          htmlFor={`use-default-${employee.id}`}
+          className="text-xs text-gray-700 cursor-pointer leading-relaxed"
+        >
+          <span className="font-medium">Use business default</span>
+          <span className="block text-gray-500 mt-0.5">
+            {defaultSummary} ({businessDefault.timezone})
+          </span>
+        </label>
+      </div>
+
+      <CaptureScheduleEditor
+        value={hours}
+        onChange={setHours}
+        disabled={useDefault}
+      />
+
+      <div className="flex items-center justify-between gap-3 mt-5">
+        <div className="text-xs">
+          {savedAt && (
+            <div className="flex items-center gap-1.5 text-emerald-700">
+              <CheckCircle2 className="w-3.5 h-3.5" />
+              Saved {new Date(savedAt).toLocaleTimeString()}
+            </div>
+          )}
+          {err && (
+            <div className="flex items-center gap-1.5 text-red-700">
+              <AlertCircle className="w-3.5 h-3.5" />
+              {err}
+            </div>
+          )}
+          {!useDefault && hours.days.length === 0 && (
+            <div className="text-amber-700">
+              No days selected — this employee will not capture at all.
+            </div>
+          )}
+        </div>
+        <button
+          type="button"
+          onClick={save}
+          disabled={saving}
+          className="flex items-center gap-1.5 px-4 py-2 text-xs font-medium bg-gray-900 text-white rounded-lg hover:bg-gray-700 disabled:opacity-50"
+        >
+          {saving ? (
+            <>
+              <Loader2 className="w-3.5 h-3.5 animate-spin" />
+              Saving…
+            </>
+          ) : (
+            <>
+              <Save className="w-3.5 h-3.5" />
+              Save schedule
+            </>
+          )}
+        </button>
+      </div>
+      <p className="text-[10px] text-gray-400 mt-3 leading-relaxed">
+        The agent on {employee.name.split(' ')[0]}&rsquo;s machine fetches
+        this on startup and once an hour. Changes take effect within an
+        hour without a reinstall.
+      </p>
     </div>
   )
 }

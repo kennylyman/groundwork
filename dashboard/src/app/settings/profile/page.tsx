@@ -485,22 +485,10 @@ export default function ProfileSettingsPage() {
 // ---------- Capture schedule ----------
 
 import {
-  ALL_DAYS,
   DEFAULT_CAPTURE_HOURS,
-  type CaptureDay,
   type CaptureHours,
 } from '@/lib/capture-hours'
-import TimezoneSelect from '@/components/ui/TimezoneSelect'
-
-const DAY_LABELS: Record<CaptureDay, string> = {
-  mon: 'Mon',
-  tue: 'Tue',
-  wed: 'Wed',
-  thu: 'Thu',
-  fri: 'Fri',
-  sat: 'Sat',
-  sun: 'Sun',
-}
+import { CaptureScheduleEditor } from '@/components/CaptureScheduleEditor'
 
 function CaptureScheduleSection() {
   const [hours, setHours] = useState<CaptureHours>(DEFAULT_CAPTURE_HOURS)
@@ -536,16 +524,6 @@ function CaptureScheduleSection() {
       cancelled = true
     }
   }, [])
-
-  function toggleDay(day: CaptureDay) {
-    setHours((h) => {
-      const has = h.days.includes(day)
-      const next = has ? h.days.filter((d) => d !== day) : [...h.days, day]
-      // Re-sort by canonical week order so the stored shape is stable.
-      const sorted = ALL_DAYS.filter((d) => next.includes(d))
-      return { ...h, days: sorted }
-    })
-  }
 
   async function save() {
     setSaving(true)
@@ -594,64 +572,13 @@ function CaptureScheduleSection() {
         </div>
       ) : (
         <>
-          <div className="mb-4">
-            <p className="text-[10px] uppercase tracking-wider font-semibold text-gray-500 mb-2">
-              Days
-            </p>
-            <div className="flex flex-wrap gap-1.5">
-              {ALL_DAYS.map((d) => {
-                const on = hours.days.includes(d)
-                return (
-                  <button
-                    key={d}
-                    type="button"
-                    onClick={() => toggleDay(d)}
-                    className={`px-3 py-1.5 rounded-lg text-xs font-medium border transition-colors ${
-                      on
-                        ? 'bg-gray-900 text-white border-gray-900'
-                        : 'bg-white text-gray-600 border-gray-200 hover:border-gray-400'
-                    }`}
-                  >
-                    {DAY_LABELS[d]}
-                  </button>
-                )
-              })}
-            </div>
-          </div>
+          <CaptureScheduleEditor value={hours} onChange={setHours} />
 
-          <div className="mb-4">
-            <p className="text-[10px] uppercase tracking-wider font-semibold text-gray-500 mb-2">
-              Hours
-            </p>
-            <div className="flex items-center gap-2 flex-wrap">
-              <input
-                type="time"
-                value={hours.start_time}
-                onChange={(e) =>
-                  setHours((h) => ({ ...h, start_time: e.target.value }))
-                }
-                className="px-3 py-2 text-sm text-gray-900 border border-gray-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-gray-900 bg-white w-32"
-              />
-              <span className="text-xs text-gray-500">to</span>
-              <input
-                type="time"
-                value={hours.end_time}
-                onChange={(e) =>
-                  setHours((h) => ({ ...h, end_time: e.target.value }))
-                }
-                className="px-3 py-2 text-sm text-gray-900 border border-gray-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-gray-900 bg-white w-32"
-              />
-              <span className="text-xs text-gray-500">in</span>
-              <TimezoneSelect
-                value={hours.timezone}
-                onChange={(tz) => setHours((h) => ({ ...h, timezone: tz }))}
-              />
-            </div>
-            <p className="text-[11px] text-gray-500 mt-2 leading-relaxed">
-              Captures follow your business timezone. Remote employees worldwide
-              capture during this same window regardless of their local time.
-            </p>
-          </div>
+          <p className="text-[11px] text-gray-500 mt-3 mb-4 leading-relaxed">
+            Captures follow your business timezone. Remote employees worldwide
+            capture during this same window regardless of their local time.
+            Individual employees can override this from the team settings page.
+          </p>
 
           <div className="flex items-center justify-between gap-3">
             <div className="text-xs">

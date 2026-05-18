@@ -54,6 +54,10 @@ export type Employee = {
   created_at: string
   agent_version?: string | null
   agent_version_updated_at?: string | null
+  // Per-employee capture schedule override (migration 0022). NULL means
+  // inherit from business_profiles.capture_hours. Shape matches CaptureHours
+  // from lib/capture-hours.ts.
+  capture_hours?: unknown
 }
 
 export type CaptureCapabilityTag = {
