@@ -281,6 +281,86 @@ export const TOOL_BY_ID: Record<string, ToolDefinition> = Object.fromEntries(
   TOOL_REGISTRY.map((t) => [t.id, t])
 )
 
+// ----- Coverage map -------------------------------------------------------
+
+/**
+ * Parent suite → child tools it functionally covers.
+ *
+ * When a parent integration is already connected for a business (ring 2
+ * or ring 3, status connected/pending), the listed children are already
+ * covered and any "connect this tool via Zapier" prompt for those
+ * children should be suppressed.
+ *
+ * Example: Microsoft 365 native OAuth gives us Microsoft Graph read
+ * access across Teams, Outlook, OneDrive, SharePoint, Excel, and Word —
+ * so prompting the owner to also wire Teams up via Zapier is noise.
+ *
+ * Notable non-entries:
+ *   - 'zapier' is intentionally NOT a parent here. A generic Zapier
+ *     webhook receiver doesn't cover individual tools — the owner still
+ *     has to author a Zap per tool — so it shouldn't suppress per-tool
+ *     prompts.
+ *
+ * Tool ids use the canonical hyphenated form stored in
+ * integrations.tool_name and TOOL_BY_ID (e.g. 'microsoft-365', not
+ * 'microsoft_365'). Some children (onedrive, sharepoint, excel, word,
+ * google-docs, google-sheets) don't have TOOL_REGISTRY entries yet —
+ * they're listed here forward-looking so they'll be suppressed if
+ * normalizeToolName starts emitting them later.
+ */
+export const INTEGRATION_COVERAGE_MAP: Record<string, string[]> = {
+  'microsoft-365': [
+    'teams',
+    'outlook',
+    'onedrive',
+    'sharepoint',
+    'excel',
+    'word',
+  ],
+  'google-workspace': [
+    'gmail',
+    'google-drive',
+    'google-calendar',
+    'google-docs',
+    'google-sheets',
+  ],
+}
+
+type CoverageIntegrationRow = {
+  tool_name: string
+  ring: number
+  status: string
+}
+
+/**
+ * Returns the set of tool_ids that are functionally covered by at least
+ * one "live" integration for this business. A row is "live" when it's
+ * ring=2 (Zapier connect) or ring=3 (native OAuth) with status connected
+ * or pending. Ring=1 detected-only doesn't count — detection is what
+ * surfaces the prompt in the first place, so treating it as coverage
+ * would suppress every prompt we ever wanted to show.
+ *
+ * The returned set includes both:
+ *   - the live integration's own tool_name (so we don't reprompt to
+ *     connect a tool that's already connected directly)
+ *   - every child listed for that parent in INTEGRATION_COVERAGE_MAP
+ */
+export function coveredToolIds(
+  integrations: CoverageIntegrationRow[]
+): Set<string> {
+  const covered = new Set<string>()
+  for (const i of integrations) {
+    const liveRing = i.ring === 2 || i.ring === 3
+    const liveStatus = i.status === 'connected' || i.status === 'pending'
+    if (!liveRing || !liveStatus) continue
+    covered.add(i.tool_name)
+    for (const child of INTEGRATION_COVERAGE_MAP[i.tool_name] ?? []) {
+      covered.add(child)
+    }
+  }
+  return covered
+}
+
 // ----- Normalization ------------------------------------------------------
 
 /**

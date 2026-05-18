@@ -3,7 +3,7 @@
 import { useEffect, useState } from 'react'
 import Link from 'next/link'
 import { Plug, Zap, X } from 'lucide-react'
-import { TOOL_BY_ID } from '@/lib/integrations'
+import { TOOL_BY_ID, coveredToolIds } from '@/lib/integrations'
 
 /**
  * Surfaces the top 1-3 detected tools that aren't yet Ring-2 connected, with
@@ -76,21 +76,17 @@ export function ConnectionPrompts() {
 
   if (!state) return null
 
-  const ring2Connected = new Set(
-    state.integrations
-      .filter((i) => i.ring === 2 && (i.status === 'connected' || i.status === 'pending'))
-      .map((i) => i.tool_name)
-  )
-  const ring3Connected = new Set(
-    state.integrations
-      .filter((i) => i.ring === 3 && i.status === 'connected')
-      .map((i) => i.tool_name)
-  )
+  // Includes both the tool_name of every live (ring 2/3, connected/pending)
+  // integration AND any children covered by a parent suite — e.g. when
+  // microsoft-365 is connected, this set contains 'microsoft-365', 'teams',
+  // 'outlook', etc. Stops us from prompting "Connect Teams via Zapier" when
+  // the owner already wired Microsoft 365 natively. See INTEGRATION_COVERAGE_MAP.
+  const covered = coveredToolIds(state.integrations)
 
   const now = Date.now()
   const candidates = state.detected_tools
     .filter((t) => t.capture_count_7d >= MIN_DETECTIONS)
-    .filter((t) => !ring2Connected.has(t.tool_id) && !ring3Connected.has(t.tool_id))
+    .filter((t) => !covered.has(t.tool_id))
     .filter((t) => !(dismissed[t.tool_id] && dismissed[t.tool_id] > now))
     .filter((t) => {
       // Skip tools we don't actually offer Ring 2 for

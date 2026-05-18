@@ -15,7 +15,12 @@ import {
   ChevronUp,
   Sparkles,
 } from 'lucide-react'
-import { TOOL_BY_ID, TOOL_REGISTRY } from '@/lib/integrations'
+import {
+  TOOL_BY_ID,
+  TOOL_REGISTRY,
+  coveredToolIds,
+  INTEGRATION_COVERAGE_MAP,
+} from '@/lib/integrations'
 import { NATIVE_TOOL_MANIFEST } from '@/lib/integrations/adapters/manifest'
 
 type Ring = 1 | 2 | 3
@@ -229,10 +234,19 @@ function IntegrationsSettingsInner() {
     const rows = (state?.integrations ?? []).filter(
       (i) => i.tool_name === m.toolName
     )
+    // Roll up child detections into the parent suite's count. Without
+    // this, M365 would show "0× detected" because normalizeToolName
+    // emits 'teams' / 'outlook', never 'microsoft-365'. We just hid the
+    // child rows from "Other tools detected" via coveredToolIds, so this
+    // is also where the user sees that the suite is actively used.
+    const childIds = INTEGRATION_COVERAGE_MAP[m.toolName] ?? []
+    const childCount = (state?.detected_tools ?? [])
+      .filter((d) => childIds.includes(d.tool_id))
+      .reduce((sum, d) => sum + d.capture_count_7d, 0)
     return {
       tool_id: m.toolName,
       tool_label: def?.label || m.label,
-      capture_count_7d: detected?.capture_count_7d ?? 0,
+      capture_count_7d: (detected?.capture_count_7d ?? 0) + childCount,
       in_intake: !!intake,
       in_intake_used_for: intake?.used_for ?? [],
       rings: {
@@ -254,9 +268,16 @@ function IntegrationsSettingsInner() {
   })
 
   // ----- Other (non-native) tools — only after the API responds -------
+  // Also suppress tools that are covered by a live parent suite (e.g. when
+  // Microsoft 365 is connected, Teams shouldn't appear here with a "Connect
+  // via Zapier" button — the M365 OAuth already covers it). The captures
+  // detection itself is untouched: the tool is still recorded in captures
+  // and contributes to reports / opportunities.
+  const covered = state ? coveredToolIds(state.integrations) : new Set<string>()
   const otherTools: ToolEntry[] = (() => {
     if (!state) return []
     const seen = new Map<string, ToolEntry>()
+    const suppress = (id: string) => nativeToolIds.has(id) || covered.has(id)
 
     function ensure(tool_id: string, tool_label: string): ToolEntry {
       const existing = seen.get(tool_id)
@@ -279,18 +300,18 @@ function IntegrationsSettingsInner() {
     }
 
     for (const d of state.detected_tools) {
-      if (nativeToolIds.has(d.tool_id)) continue
+      if (suppress(d.tool_id)) continue
       const t = ensure(d.tool_id, d.tool_label)
       t.capture_count_7d = d.capture_count_7d
     }
     for (const i of state.intake_tools) {
-      if (nativeToolIds.has(i.tool_id)) continue
+      if (suppress(i.tool_id)) continue
       const t = ensure(i.tool_id, i.tool_label)
       t.in_intake = true
       t.in_intake_used_for = i.used_for
     }
     for (const row of state.integrations) {
-      if (nativeToolIds.has(row.tool_name)) continue
+      if (suppress(row.tool_name)) continue
       const t = ensure(
         row.tool_name,
         TOOL_BY_ID[row.tool_name]?.label || row.tool_name
