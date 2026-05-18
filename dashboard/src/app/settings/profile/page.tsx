@@ -437,6 +437,12 @@ export default function ProfileSettingsPage() {
         />
       </FieldSection>
 
+      {/* Capture schedule — separate save flow (uses /api/settings/capture,
+          not /api/settings/profile) so we don't bloat the profile PATCH
+          with operational concerns. */}
+      <CaptureScheduleSection />
+
+
       {/* Save bar */}
       <div className="sticky bottom-4 z-10 bg-white rounded-2xl border border-gray-200 shadow-sm px-5 py-3 flex items-center justify-between gap-4">
         <div className="text-xs">
@@ -472,6 +478,214 @@ export default function ProfileSettingsPage() {
           )}
         </button>
       </div>
+    </div>
+  )
+}
+
+// ---------- Capture schedule ----------
+
+import {
+  ALL_DAYS,
+  DEFAULT_CAPTURE_HOURS,
+  type CaptureDay,
+  type CaptureHours,
+} from '@/lib/capture-hours'
+
+const DAY_LABELS: Record<CaptureDay, string> = {
+  mon: 'Mon',
+  tue: 'Tue',
+  wed: 'Wed',
+  thu: 'Thu',
+  fri: 'Fri',
+  sat: 'Sat',
+  sun: 'Sun',
+}
+
+function CaptureScheduleSection() {
+  const [hours, setHours] = useState<CaptureHours>(DEFAULT_CAPTURE_HOURS)
+  const [isDefault, setIsDefault] = useState(true)
+  const [loading, setLoading] = useState(true)
+  const [saving, setSaving] = useState(false)
+  const [savedAt, setSavedAt] = useState<number | null>(null)
+  const [err, setErr] = useState<string | null>(null)
+
+  useEffect(() => {
+    let cancelled = false
+    void (async () => {
+      try {
+        const r = await fetch('/api/settings/capture', { cache: 'no-store' })
+        const body = await r.json()
+        if (!r.ok) throw new Error(body.error || `HTTP ${r.status}`)
+        if (cancelled) return
+        setHours({
+          days: body.days,
+          start_time: body.start_time,
+          end_time: body.end_time,
+        })
+        setIsDefault(!!body.default)
+      } catch (e) {
+        if (cancelled) return
+        setErr(e instanceof Error ? e.message : 'load failed')
+      } finally {
+        if (!cancelled) setLoading(false)
+      }
+    })()
+    return () => {
+      cancelled = true
+    }
+  }, [])
+
+  function toggleDay(day: CaptureDay) {
+    setHours((h) => {
+      const has = h.days.includes(day)
+      const next = has ? h.days.filter((d) => d !== day) : [...h.days, day]
+      // Re-sort by canonical week order so the stored shape is stable.
+      const sorted = ALL_DAYS.filter((d) => next.includes(d))
+      return { ...h, days: sorted }
+    })
+  }
+
+  async function save() {
+    setSaving(true)
+    setErr(null)
+    try {
+      const r = await fetch('/api/settings/capture', {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(hours),
+      })
+      const body = await r.json().catch(() => ({}))
+      if (!r.ok) throw new Error(body.error || `HTTP ${r.status}`)
+      setIsDefault(false)
+      setSavedAt(Date.now())
+      setTimeout(() => setSavedAt(null), 3000)
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : 'save failed')
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  return (
+    <div className="bg-white rounded-2xl border border-gray-200 p-6">
+      <div className="flex items-baseline justify-between mb-1">
+        <h3 className="text-[11px] uppercase tracking-wider font-semibold text-gray-500">
+          Capture schedule
+        </h3>
+        {isDefault && !loading && (
+          <span className="text-[10px] text-gray-400">
+            Using defaults (Mon-Fri, 8 AM-6 PM)
+          </span>
+        )}
+      </div>
+      <p className="text-xs text-gray-500 mb-4 leading-relaxed">
+        When do the Groundwork agents run on each employee&rsquo;s machine?
+        Outside these hours, no screenshots are taken and no data is sent.
+        Times are local to each employee&rsquo;s computer.
+      </p>
+
+      {loading ? (
+        <div className="flex items-center gap-2 text-xs text-gray-500">
+          <Loader2 className="w-3.5 h-3.5 animate-spin" />
+          Loading...
+        </div>
+      ) : (
+        <>
+          <div className="mb-4">
+            <p className="text-[10px] uppercase tracking-wider font-semibold text-gray-500 mb-2">
+              Days
+            </p>
+            <div className="flex flex-wrap gap-1.5">
+              {ALL_DAYS.map((d) => {
+                const on = hours.days.includes(d)
+                return (
+                  <button
+                    key={d}
+                    type="button"
+                    onClick={() => toggleDay(d)}
+                    className={`px-3 py-1.5 rounded-lg text-xs font-medium border transition-colors ${
+                      on
+                        ? 'bg-gray-900 text-white border-gray-900'
+                        : 'bg-white text-gray-600 border-gray-200 hover:border-gray-400'
+                    }`}
+                  >
+                    {DAY_LABELS[d]}
+                  </button>
+                )
+              })}
+            </div>
+          </div>
+
+          <div className="mb-4">
+            <p className="text-[10px] uppercase tracking-wider font-semibold text-gray-500 mb-2">
+              Hours (local time on each agent&rsquo;s machine)
+            </p>
+            <div className="flex items-center gap-2">
+              <input
+                type="time"
+                value={hours.start_time}
+                onChange={(e) =>
+                  setHours((h) => ({ ...h, start_time: e.target.value }))
+                }
+                className="px-3 py-2 text-sm text-gray-900 border border-gray-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-gray-900 bg-white w-32"
+              />
+              <span className="text-xs text-gray-500">to</span>
+              <input
+                type="time"
+                value={hours.end_time}
+                onChange={(e) =>
+                  setHours((h) => ({ ...h, end_time: e.target.value }))
+                }
+                className="px-3 py-2 text-sm text-gray-900 border border-gray-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-gray-900 bg-white w-32"
+              />
+            </div>
+          </div>
+
+          <div className="flex items-center justify-between gap-3">
+            <div className="text-xs">
+              {savedAt && (
+                <div className="flex items-center gap-1.5 text-emerald-700">
+                  <CheckCircle2 className="w-3.5 h-3.5" />
+                  Saved {new Date(savedAt).toLocaleTimeString()}
+                </div>
+              )}
+              {err && (
+                <div className="flex items-center gap-1.5 text-red-700">
+                  <AlertCircle className="w-3.5 h-3.5" />
+                  {err}
+                </div>
+              )}
+              {hours.days.length === 0 && (
+                <div className="text-amber-700">
+                  No days selected — agents will not capture at all.
+                </div>
+              )}
+            </div>
+            <button
+              type="button"
+              onClick={save}
+              disabled={saving}
+              className="flex items-center gap-1.5 px-4 py-2 text-xs font-medium bg-gray-900 text-white rounded-lg hover:bg-gray-700 disabled:opacity-50"
+            >
+              {saving ? (
+                <>
+                  <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                  Saving...
+                </>
+              ) : (
+                <>
+                  <Save className="w-3.5 h-3.5" />
+                  Save schedule
+                </>
+              )}
+            </button>
+          </div>
+          <p className="text-[10px] text-gray-400 mt-3 leading-relaxed">
+            Agents fetch this config on startup and refresh once an hour.
+            Changes propagate within an hour without requiring a reinstall.
+          </p>
+        </>
+      )}
     </div>
   )
 }

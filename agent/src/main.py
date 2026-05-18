@@ -26,10 +26,25 @@ ACTIVATION_URL = os.environ.get(
     'GROUNDWORK_ACTIVATION_URL',
     'https://gwork.tech/api/activate',
 )
+CAPTURE_SETTINGS_URL = os.environ.get(
+    'GROUNDWORK_CAPTURE_SETTINGS_URL',
+    'https://gwork.tech/api/settings/capture',
+)
 CAPTURE_INTERVAL = 30
 PAUSE_CHECK_EVERY = 5  # captures between pause-state polls
 # Soft-update cadence: re-check at most once an hour, only when idle (>60s).
 SOFT_UPDATE_CHECK_INTERVAL_SECONDS = 3600
+# Capture-hours refresh cadence: re-fetch the schedule once an hour so
+# owner changes in /settings/profile propagate without a restart.
+CAPTURE_HOURS_REFRESH_SECONDS = 3600
+
+# Defaults applied when the server is unreachable or returns garbage. Match
+# the server-side defaults in lib/capture-hours.ts.
+DEFAULT_CAPTURE_HOURS = {
+    "days": ["mon", "tue", "wed", "thu", "fri"],
+    "start_time": "08:00",
+    "end_time": "18:00",
+}
 
 
 def log(msg: str) -> None:
@@ -308,6 +323,70 @@ def _ensure_startup_installed(config: dict) -> None:
         log(f"Could not persist startup_installed flag: {e}")
 
 
+def _fetch_capture_hours(install_token: str | None) -> dict | None:
+    """Pull the capture-hours config from the dashboard. Returns the dict on
+    success, None on any failure (caller falls back to whatever's cached
+    or the hardcoded default). Never raises — capture-hours fetch is a
+    soft signal; failures must not kill the capture loop.
+    """
+    if not install_token:
+        return None
+    try:
+        response = requests.get(
+            CAPTURE_SETTINGS_URL,
+            headers={"X-Groundwork-Install-Token": install_token},
+            timeout=10,
+        )
+        if response.status_code != 200:
+            log(f"capture-hours fetch: HTTP {response.status_code}")
+            return None
+        body = response.json()
+        # Light shape validation — server already validates on PATCH but
+        # the agent gets to be paranoid.
+        days = body.get("days")
+        start_time = body.get("start_time")
+        end_time = body.get("end_time")
+        if not isinstance(days, list) or not all(isinstance(d, str) for d in days):
+            return None
+        if not isinstance(start_time, str) or not isinstance(end_time, str):
+            return None
+        return {"days": days, "start_time": start_time, "end_time": end_time}
+    except requests.exceptions.RequestException as e:
+        log(f"capture-hours fetch network error: {e}")
+        return None
+    except Exception as e:
+        log(f"capture-hours fetch unexpected error: {e}")
+        return None
+
+
+def _is_within_business_hours(hours: dict, now: datetime | None = None) -> bool:
+    """True iff the current local time is inside the configured window.
+    Defensive: any malformed hours dict returns True so we don't
+    accidentally silence the agent. Garbage settings shouldn't stop work."""
+    if not isinstance(hours, dict):
+        return True
+    days = hours.get("days")
+    if not isinstance(days, list):
+        return True
+    now = now or datetime.now()
+    day_abbrev = now.strftime("%a").lower()
+    if day_abbrev not in days:
+        return False
+
+    start_time = hours.get("start_time", "08:00")
+    end_time = hours.get("end_time", "18:00")
+    try:
+        start_h, start_m = start_time.split(":")
+        end_h, end_m = end_time.split(":")
+        start_min = int(start_h) * 60 + int(start_m)
+        end_min = int(end_h) * 60 + int(end_m)
+    except (ValueError, AttributeError):
+        return True  # malformed time string -> don't gate
+
+    current_min = now.hour * 60 + now.minute
+    return start_min <= current_min < end_min
+
+
 def check_is_paused(config: dict) -> bool:
     """
     Poll Supabase for this employee's is_paused flag via the
@@ -401,9 +480,32 @@ def run_capture_loop(config: dict) -> None:
     # is one full interval after startup (hard check on startup already
     # ran in main()).
     last_soft_update_check = time.time()
+    # Throttle capture-hours refreshes. Init to "now" so we start with
+    # whatever was loaded at activation and refresh after one full
+    # interval (an hour).
+    last_capture_hours_refresh = time.time()
 
     while True:
         try:
+            # Re-fetch capture-hours config periodically so owner changes
+            # made in /settings/profile propagate without restart. Soft —
+            # any failure keeps the cached value.
+            if time.time() - last_capture_hours_refresh > CAPTURE_HOURS_REFRESH_SECONDS:
+                fresh = _fetch_capture_hours(config.get("install_token"))
+                if fresh:
+                    if fresh != config.get("capture_hours"):
+                        log(f"Capture hours updated: {fresh}")
+                    config["capture_hours"] = fresh
+                last_capture_hours_refresh = time.time()
+
+            # Business-hours gate. Outside the configured window we skip
+            # the snapshot entirely — no screenshot taken, no Anthropic
+            # call, no transmit. Pause-check + soft-update still run so
+            # the agent stays responsive to changes when it returns to
+            # business hours.
+            hours = config.get("capture_hours") or DEFAULT_CAPTURE_HOURS
+            within_hours = _is_within_business_hours(hours)
+
             # Re-poll pause state every PAUSE_CHECK_EVERY iterations (and at start).
             if capture_count % PAUSE_CHECK_EVERY == 0:
                 new_paused = check_is_paused(config)
@@ -411,7 +513,9 @@ def run_capture_loop(config: dict) -> None:
                     log(f"Pause state changed: {is_paused} -> {new_paused}")
                 is_paused = new_paused
 
-            if is_paused:
+            if not within_hours:
+                log("Outside business hours — skipping cycle")
+            elif is_paused:
                 log("Paused — skipping capture cycle")
             else:
                 snapshot = build_context_snapshot(previous_tasks=recent_tasks[-5:])
@@ -519,6 +623,18 @@ def main() -> None:
     log(f"Anthropic key: {'set' if config.get('anthropic_api_key') else 'MISSING'}")
 
     _maybe_hard_update(config)
+
+    # Fetch the business's capture schedule before entering the loop.
+    # Falls back to DEFAULT_CAPTURE_HOURS on any failure — agents
+    # without network on first run still capture during the default
+    # Mon-Fri 8-18 window. The loop re-fetches every hour.
+    fresh_hours = _fetch_capture_hours(config.get("install_token"))
+    if fresh_hours:
+        config["capture_hours"] = fresh_hours
+        log(f"Capture hours loaded: {fresh_hours}")
+    else:
+        config["capture_hours"] = DEFAULT_CAPTURE_HOURS
+        log(f"Capture hours fetch failed, using defaults: {DEFAULT_CAPTURE_HOURS}")
 
     run_capture_loop(config)
 
