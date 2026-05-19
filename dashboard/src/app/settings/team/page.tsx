@@ -28,6 +28,17 @@ import {
   CaptureScheduleEditor,
   summarizeCaptureHours,
 } from '@/components/CaptureScheduleEditor'
+import {
+  AgentHealthChip,
+  LastActiveChip,
+} from '@/components/AgentStatusIndicators'
+import {
+  agentHealth,
+  lastActive,
+  ageLabel,
+  type AgentHealth,
+  type LastActive,
+} from '@/lib/agent-heartbeat'
 
 const ROLES = [
   'Owner',
@@ -48,6 +59,11 @@ export default function TeamSettingsPage() {
   const [employees, setEmployees] = useState<Employee[]>([])
   const [businessDefault, setBusinessDefault] =
     useState<CaptureHours>(DEFAULT_CAPTURE_HOURS)
+  // Latest captures.captured_at per employee within the last 7 days,
+  // used by the AgentHealthChip + LastActiveChip on each row. Stored as
+  // a plain object so the indicator-builder callback is referentially
+  // stable across renders.
+  const [lastCaptureAtById, setLastCaptureAtById] = useState<Record<string, string>>({})
   const [loading, setLoading] = useState(true)
   const [adding, setAdding] = useState(false)
   const [sending, setSending] = useState<string | null>(null)
@@ -76,19 +92,41 @@ export default function TeamSettingsPage() {
       return
     }
     setBusiness(biz)
-    const [empRes, scheduleRes] = await Promise.all([
+    // 7-day window — wide enough that anyone working in a normal week
+    // surfaces a real "Last active" timestamp; narrow enough to keep
+    // the returned row count manageable for businesses with high
+    // capture volume.
+    const sevenDaysAgo = new Date(
+      Date.now() - 7 * 24 * 60 * 60 * 1000
+    ).toISOString()
+
+    const [empRes, scheduleRes, capturesRes] = await Promise.all([
       supabase
         .from('employees')
         .select('*')
         .eq('business_id', biz.id)
         .order('created_at'),
       // Owner cookie path → returns the business-level schedule. Used
-      // as the "Use business default" preview/fallback for each employee.
+      // as the "Use business default" preview/fallback for each employee
+      // AND as the business-hours config for the LastActiveChip's
+      // idle-vs-off-hours qualifier.
       fetch('/api/settings/capture', { cache: 'no-store' })
         .then((r) => r.json())
         .catch(() => null),
+      // Lightweight last-captured-at lookup for the status chips. Pulled
+      // separately from /api/page.tsx's identical query because the team
+      // page doesn't currently route through any server component that
+      // could share it; the round-trip is small (two columns × ≤ 10K rows).
+      supabase
+        .from('captures')
+        .select('employee_id, captured_at')
+        .eq('business_id', biz.id)
+        .gte('captured_at', sevenDaysAgo)
+        .order('captured_at', { ascending: false }),
     ])
+
     setEmployees(empRes.data ?? [])
+
     if (scheduleRes && typeof scheduleRes === 'object' && !scheduleRes.error) {
       setBusinessDefault({
         days: scheduleRes.days,
@@ -97,6 +135,17 @@ export default function TeamSettingsPage() {
         timezone: scheduleRes.timezone || DEFAULT_CAPTURE_HOURS.timezone,
       })
     }
+
+    // First hit per employee in the ordered-desc list = their most
+    // recent capture (the query is already ordered).
+    const latestById: Record<string, string> = {}
+    for (const row of (capturesRes.data ?? []) as Array<{ employee_id: string; captured_at: string }>) {
+      if (!(row.employee_id in latestById)) {
+        latestById[row.employee_id] = row.captured_at
+      }
+    }
+    setLastCaptureAtById(latestById)
+
     setLoading(false)
   }
 
@@ -282,7 +331,7 @@ export default function TeamSettingsPage() {
                     href={`/employee/${emp.id}`}
                     className="flex items-center gap-3 group min-w-0 flex-1"
                   >
-                    <div className="w-8 h-8 bg-gray-100 rounded-full flex items-center justify-center text-xs font-medium text-gray-600">
+                    <div className="w-8 h-8 bg-gray-100 rounded-full flex items-center justify-center text-xs font-medium text-gray-600 shrink-0">
                       {emp.name.split(' ').map((n) => n[0]).join('').slice(0, 2)}
                     </div>
                     <div className="min-w-0">
@@ -293,6 +342,18 @@ export default function TeamSettingsPage() {
                         {emp.role}
                         {emp.email && ` · ${emp.email}`}
                       </p>
+                      {/* Split-signal status chips — same component used
+                          on the home dashboard so the two surfaces never
+                          drift. AgentHealthChip = process alive vs not.
+                          LastActiveChip = relative timestamp + idle/off-
+                          hours qualifier. */}
+                      <div className="flex items-center gap-1 flex-wrap mt-1">
+                        <EmployeeStatusChips
+                          emp={emp}
+                          lastCaptureAt={lastCaptureAtById[emp.id] ?? null}
+                          businessHours={businessDefault}
+                        />
+                      </div>
                     </div>
                     <ExternalLink className="w-3 h-3 text-gray-300 group-hover:text-gray-500 ml-1" />
                   </Link>
@@ -398,6 +459,40 @@ export default function TeamSettingsPage() {
         </div>
       </div>
     </div>
+  )
+}
+
+// ---------- Per-row status chips ----------
+
+/**
+ * Renders the AgentHealthChip + LastActiveChip pair for an employee row.
+ * Thin wrapper so the parent doesn't need to know about the LastActive
+ * shape or the agentHealth() call — just hand it the inputs.
+ */
+function EmployeeStatusChips({
+  emp,
+  lastCaptureAt,
+  businessHours,
+}: {
+  emp: Employee
+  lastCaptureAt: string | null
+  businessHours: CaptureHours
+}) {
+  const health: AgentHealth = agentHealth(emp)
+  const active: LastActive = lastActive({
+    last_capture_at: lastCaptureAt,
+    agent_health: health,
+    business_hours: businessHours,
+  })
+  const heartbeatAge = ageLabel({
+    agent_version_updated_at: emp.agent_version_updated_at ?? null,
+    last_capture_at: lastCaptureAt,
+  })
+  return (
+    <>
+      <AgentHealthChip health={health} ageLabel={heartbeatAge} />
+      <LastActiveChip value={active} />
+    </>
   )
 }
 

@@ -2,7 +2,7 @@
 
 import { useEffect, useState } from 'react'
 import { supabase, Employee, Capture } from '@/lib/supabase'
-import { Activity, Users, Zap, TrendingUp, Clock, AlertCircle, FileText, Sparkles, Settings, WifiOff } from 'lucide-react'
+import { Activity, Users, Zap, TrendingUp, Clock, AlertCircle, FileText, Sparkles, Settings } from 'lucide-react'
 import { useRouter } from 'next/navigation'
 import Link from 'next/link'
 import { PauseToggle, PausedBadge } from '@/components/PauseToggle'
@@ -13,8 +13,18 @@ import { SignOutButton } from '@/components/SignOutButton'
 import {
   computeHeartbeatStatus,
   ageLabel,
+  agentHealth,
+  lastActive,
   type HeartbeatStatus,
+  type AgentHealth,
+  type LastActive,
 } from '@/lib/agent-heartbeat'
+import {
+  DEFAULT_CAPTURE_HOURS,
+  parseCaptureHours,
+  type CaptureHours,
+} from '@/lib/capture-hours'
+import { AgentHealthChip, LastActiveChip } from '@/components/AgentStatusIndicators'
 
 type EmployeeWithStatus = Employee & {
   latest_capture?: Capture
@@ -24,6 +34,15 @@ type EmployeeWithStatus = Employee & {
   has_unack_role_discovery: boolean
   heartbeat_status: HeartbeatStatus
   heartbeat_age: string
+  /** Three-state agent process health — replaces the dot above for the
+   *  new split-signal indicators. */
+  agent_health: AgentHealth
+  /** Latest captures.captured_at for this employee within the last 7 days;
+   *  null when the employee has no captures in that window. Used to power
+   *  the "Last active" chip. */
+  last_capture_at: string | null
+  /** Pre-computed "Last active" label + qualifier for rendering. */
+  last_active: LastActive
 }
 
 const AUTOMATION_COLORS: Record<string, string> = {
@@ -33,11 +52,12 @@ const AUTOMATION_COLORS: Record<string, string> = {
   none: 'text-gray-400 bg-gray-50',
 }
 
-const STATUS_COLORS: Record<string, string> = {
-  active: 'bg-green-400',
-  idle: 'bg-amber-400',
-  offline: 'bg-gray-300',
-}
+// STATUS_COLORS removed in the split-signal refactor — the colored dot
+// on the avatar was a single 3-state (active/idle/offline) signal that
+// conflated agent process state with employee activity. Replaced by the
+// AgentHealthChip + LastActiveChip pair on the row. The `status` field
+// on enriched employees is still computed and used by the activeNow
+// stats counter below.
 
 const CATEGORY_COLORS: Record<string, string> = {
   'Schedule Management': 'bg-blue-100 text-blue-700',
@@ -95,41 +115,79 @@ export default function Dashboard() {
       const todayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate()).toISOString()
       const fifteenMinutesAgo = new Date(now.getTime() - 15 * 60 * 1000).toISOString()
       const sixtyMinutesAgo = new Date(now.getTime() - 60 * 60 * 1000).toISOString()
+      // 7 days back is wide enough to surface "last active" for everyone
+      // except actually-stale employees, and narrow enough to keep the
+      // returned row count manageable. Beyond 7 days we render
+      // "No activity yet" — the operator-actionable signal is the same.
+      const sevenDaysAgo = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000).toISOString()
 
       const employeeIds = employeeList.map((e) => e.id)
 
       // ----- Bulk reads, no N+1 ------------------------------------------
       // Before: 3 queries × N employees + 1 unack query = 3N+1 round trips.
-      // After: 4 bulk reads, regardless of team size.
+      // After: bulk reads, regardless of team size. The added 7-day query
+      // and business-hours fetch run in parallel with everything else.
+      //
+      // 1. Unacknowledged role discoveries.
+      // 2. Most-recent capture (60 min, full payload) for the "current
+      //    task" display.
+      // 3. Today's captures (light columns) — counted client-side.
+      // 4. NEW: captured_at over 7 days, employee_id-only, for the
+      //    "Last active" chip on each row. Tiny row size keeps this cheap.
+      // 5. NEW: business-hours config — needed so "30 min idle during
+      //    business hours" vs "off-hours silence" reads correctly.
 
-      // 1. Unacknowledged role discoveries — already bulk in earlier pass.
-      // 2. Most-recent capture per employee — fetch within the activity
-      //    window (60min) since that's the longest "latest" we render. If
-      //    nothing fell in that window, the employee is "offline" anyway
-      //    and we don't need the capture's content. Group by employee_id
-      //    in memory to keep the latest.
-      // 3. Today's captures (light columns: employee_id, automation_potential)
-      //    — counted client-side per employee.
+      const [
+        { data: unackProfiles },
+        { data: recentCaptures },
+        { data: todaysCaptures },
+        { data: weekCaptures },
+        scheduleResp,
+      ] = await Promise.all([
+        supabase
+          .from('employee_role_profiles')
+          .select('employee_id')
+          .in('employee_id', employeeIds)
+          .is('acknowledged_at', null),
+        supabase
+          .from('captures')
+          .select('*')
+          .in('employee_id', employeeIds)
+          .gte('captured_at', sixtyMinutesAgo)
+          .order('captured_at', { ascending: false }),
+        supabase
+          .from('captures')
+          .select('employee_id, automation_potential')
+          .in('employee_id', employeeIds)
+          .gte('captured_at', todayStart),
+        supabase
+          .from('captures')
+          .select('employee_id, captured_at')
+          .in('employee_id', employeeIds)
+          .gte('captured_at', sevenDaysAgo)
+          .order('captured_at', { ascending: false }),
+        fetch('/api/settings/capture', { cache: 'no-store' })
+          .then((r) => (r.ok ? r.json() : null))
+          .catch(() => null),
+      ])
 
-      const [{ data: unackProfiles }, { data: recentCaptures }, { data: todaysCaptures }] =
-        await Promise.all([
-          supabase
-            .from('employee_role_profiles')
-            .select('employee_id')
-            .in('employee_id', employeeIds)
-            .is('acknowledged_at', null),
-          supabase
-            .from('captures')
-            .select('*')
-            .in('employee_id', employeeIds)
-            .gte('captured_at', sixtyMinutesAgo)
-            .order('captured_at', { ascending: false }),
-          supabase
-            .from('captures')
-            .select('employee_id, automation_potential')
-            .in('employee_id', employeeIds)
-            .gte('captured_at', todayStart),
-        ])
+      // Resolve business-hours config from the API response, parsed
+      // through the same helper the settings page uses so invalid /
+      // missing fields fall through to defaults rather than breaking
+      // the dashboard chips.
+      const businessHours: CaptureHours = scheduleResp
+        ? parseCaptureHours(scheduleResp)
+        : DEFAULT_CAPTURE_HOURS
+
+      // First hit per employee in the 7-day query = their most-recent
+      // capture (the query is already ordered desc). Map remains tiny —
+      // one timestamp per employee.
+      const lastCaptureAtByEmployee = new Map<string, string>()
+      for (const row of (weekCaptures ?? []) as Array<Pick<Capture, 'employee_id' | 'captured_at'>>) {
+        if (!lastCaptureAtByEmployee.has(row.employee_id)) {
+          lastCaptureAtByEmployee.set(row.employee_id, row.captured_at)
+        }
+      }
 
       const unackSet = new Set((unackProfiles ?? []).map((p) => p.employee_id))
 
@@ -163,18 +221,17 @@ export default function Dashboard() {
 
       const enriched: EmployeeWithStatus[] = employeeList.map((emp) => {
         const latest = latestByEmployee.get(emp.id)
+        const last_capture_at =
+          lastCaptureAtByEmployee.get(emp.id) ?? latest?.captured_at ?? null
+
         let status: 'active' | 'idle' | 'offline' = 'offline'
         if (latest) {
           const captureTime = new Date(latest.captured_at).toISOString()
           if (captureTime > fifteenMinutesAgo) status = 'active'
           else if (captureTime > sixtyMinutesAgo) status = 'idle'
         }
-        // Heartbeat status is a separate signal from `status` above. status
-        // = "did they have a capture in the last 60 min" (presence indicator).
-        // heartbeat_status = "is the agent process actually alive?" — uses
-        // both agent_version_updated_at and the latest capture timestamp,
-        // with business-hours gating. An employee at lunch on a weekday
-        // is "idle" but heartbeat_status = "active" (their agent is fine).
+        // Legacy single-signal heartbeat (still used by the digest cron
+        // and any callers we haven't migrated).
         const heartbeat_status = computeHeartbeatStatus({
           agent_version_updated_at: emp.agent_version_updated_at ?? null,
           last_capture_at: latest?.captured_at ?? null,
@@ -183,6 +240,22 @@ export default function Dashboard() {
           agent_version_updated_at: emp.agent_version_updated_at ?? null,
           last_capture_at: latest?.captured_at ?? null,
         })
+
+        // New split-signal indicators — primary status display on this
+        // page. agent_health uses only the heartbeat (not captures), so
+        // an employee at lunch with a healthy agent reads "Active" here
+        // while last_active reads "30 min ago" — exactly the
+        // disambiguation the legacy single badge couldn't express.
+        const agent_health = agentHealth(emp, now)
+        const last_active = lastActive(
+          {
+            last_capture_at,
+            agent_health,
+            business_hours: businessHours,
+          },
+          now
+        )
+
         return {
           ...emp,
           latest_capture: latest,
@@ -192,6 +265,9 @@ export default function Dashboard() {
           status,
           heartbeat_status,
           heartbeat_age,
+          agent_health,
+          last_capture_at,
+          last_active,
         }
       })
 
@@ -327,35 +403,29 @@ export default function Dashboard() {
                   }`}
                 >
                   {/* Status + Name */}
-                  <div className="flex items-center gap-3 w-48">
-                    <div className="relative">
-                      <div className="w-8 h-8 bg-gray-100 rounded-full flex items-center justify-center text-xs font-medium text-gray-600">
-                        {emp.name.split(' ').map(n => n[0]).join('').slice(0, 2)}
-                      </div>
-                      <div className={`absolute -bottom-0.5 -right-0.5 w-2.5 h-2.5 rounded-full border-2 border-white ${STATUS_COLORS[emp.status]}`} />
+                  <div className="flex items-center gap-3 w-72">
+                    <div className="w-8 h-8 bg-gray-100 rounded-full flex items-center justify-center text-xs font-medium text-gray-600 shrink-0">
+                      {emp.name.split(' ').map(n => n[0]).join('').slice(0, 2)}
                     </div>
-                    <div className="min-w-0">
-                      <div className="flex items-center gap-1.5">
+                    <div className="min-w-0 flex-1">
+                      <div className="flex items-center gap-1.5 flex-wrap">
                         <p className="text-sm font-medium text-gray-900 truncate">{emp.name}</p>
                         {emp.is_paused && <PausedBadge />}
                         {emp.has_unack_role_discovery && <RoleDiscoveryBadge />}
-                        {emp.heartbeat_status === 'warning' && (
-                          <HeartbeatBadge
-                            tone="amber"
-                            label="Agent quiet"
-                            tooltip={`Agent last checked in ${emp.heartbeat_age}. Expected during business hours.`}
-                          />
-                        )}
-                        {(emp.heartbeat_status === 'silent' ||
-                          emp.heartbeat_status === 'silent_long') && (
-                          <HeartbeatBadge
-                            tone="red"
-                            label="Agent silent"
-                            tooltip={`Agent has not checked in for ${emp.heartbeat_age}. May need re-install.`}
-                          />
-                        )}
                       </div>
-                      <p className="text-xs text-gray-500">{emp.role || 'Admin'}</p>
+                      {/* Split-signal indicators: agent process health
+                          (green/red/gray) is distinct from last-activity
+                          (timestamp + idle/off-hours qualifier). Owners
+                          can finally tell a crashed agent apart from an
+                          off-shift employee. */}
+                      <div className="flex items-center gap-1 flex-wrap mt-1">
+                        <AgentHealthChip
+                          health={emp.agent_health}
+                          ageLabel={emp.heartbeat_age}
+                        />
+                        <LastActiveChip value={emp.last_active} />
+                      </div>
+                      <p className="text-xs text-gray-500 mt-1">{emp.role || 'Admin'}</p>
                     </div>
                   </div>
 
@@ -450,26 +520,7 @@ function RoleDiscoveryBadge() {
   )
 }
 
-function HeartbeatBadge({
-  tone,
-  label,
-  tooltip,
-}: {
-  tone: 'amber' | 'red'
-  label: string
-  tooltip: string
-}) {
-  const cls =
-    tone === 'red'
-      ? 'bg-red-50 text-red-700 border-red-200'
-      : 'bg-amber-50 text-amber-700 border-amber-200'
-  return (
-    <span
-      title={tooltip}
-      className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-medium border ${cls}`}
-    >
-      <WifiOff className="w-2.5 h-2.5" />
-      {label}
-    </span>
-  )
-}
+// HeartbeatBadge removed in the split-signal refactor. Replaced by
+// AgentHealthChip + LastActiveChip from @/components/AgentStatusIndicators,
+// which expose the two underlying signals as separate chips rather than
+// a single combined warning.

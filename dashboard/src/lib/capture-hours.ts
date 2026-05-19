@@ -100,6 +100,69 @@ export function parseCaptureHours(raw: unknown): CaptureHours {
   return { days, start_time, end_time, timezone }
 }
 
+/** Day-of-week shorthand emitted by Intl.DateTimeFormat 'short'. */
+const _INTL_WEEKDAY_TO_DAY: Record<string, CaptureDay> = {
+  Mon: 'mon',
+  Tue: 'tue',
+  Wed: 'wed',
+  Thu: 'thu',
+  Fri: 'fri',
+  Sat: 'sat',
+  Sun: 'sun',
+}
+
+/**
+ * Returns true when `when` falls inside the configured capture window in
+ * the BUSINESS timezone. Mirrors the agent's _is_within_business_hours()
+ * in main.py so dashboard chips agree with what the agent will actually do.
+ *
+ * Defensive: any structural problem with the hours config returns true
+ * (don't accidentally silence the agent). Parse failures return true too.
+ *
+ * Used by the dashboard to decide whether "the agent hasn't sent anything
+ * for 30 min" should be flagged as "Idle at desk" or accepted as "Off
+ * hours, expected silence".
+ */
+export function isWithinBusinessHours(
+  when: Date,
+  hours: CaptureHours
+): boolean {
+  if (!hours || !Array.isArray(hours.days)) return true
+  try {
+    const fmt = new Intl.DateTimeFormat('en-US', {
+      timeZone: hours.timezone || DEFAULT_TIMEZONE,
+      weekday: 'short',
+      hour: '2-digit',
+      minute: '2-digit',
+      hour12: false,
+    })
+    const parts = fmt.formatToParts(when)
+    const weekdayPart = parts.find((p) => p.type === 'weekday')?.value
+    const hourPart = parts.find((p) => p.type === 'hour')?.value
+    const minutePart = parts.find((p) => p.type === 'minute')?.value
+    if (!weekdayPart || !hourPart || !minutePart) return true
+
+    const day = _INTL_WEEKDAY_TO_DAY[weekdayPart]
+    if (!day || !hours.days.includes(day)) return false
+
+    const hourNum = parseInt(hourPart, 10)
+    // Intl can emit "24" at midnight depending on hour12/locale combos;
+    // normalize to 0 so the minute math is sane.
+    const h = hourNum === 24 ? 0 : hourNum
+    const m = parseInt(minutePart, 10)
+    if (Number.isNaN(h) || Number.isNaN(m)) return true
+
+    const currentMin = h * 60 + m
+    const startMin = timeToMinutes(hours.start_time)
+    const endMin = timeToMinutes(hours.end_time)
+    return currentMin >= startMin && currentMin < endMin
+  } catch {
+    // Unknown timezone, parse error, etc. — fall open (assume in-hours)
+    // so we don't suppress dashboard signals on garbage config.
+    return true
+  }
+}
+
 /** Validate a payload incoming on PATCH from the settings UI. Returns
  *  the normalized CaptureHours or an Error message describing what's
  *  invalid (so the API can 400). */
