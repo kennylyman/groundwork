@@ -27,6 +27,14 @@ LOG_FILE = CONFIG_DIR / 'groundwork.log'
 CONFIG_FILE = CONFIG_DIR / 'config.json'
 QUEUE_DB = CONFIG_DIR / 'queue.db'
 
+# PyInstaller --runtime-tmpdir target. The bootloader extracts to this
+# location BEFORE Python starts; if the bootloader's extraction failed
+# the user already saw a Windows "Failed to load python311.dll" dialog
+# and Python never ran. By the time we reach this constant the dir
+# exists, but we still verify it on every startup in _verify_runtime_dir
+# to catch corruption / AV deletion that happens mid-session.
+RUNTIME_DIR = CONFIG_DIR / 'runtime'
+
 ACTIVATION_URL = os.environ.get(
     'GROUNDWORK_ACTIVATION_URL',
     'https://gwork.tech/api/activate',
@@ -746,6 +754,80 @@ def _maybe_hard_update(config: dict) -> None:
         # inside perform_update().
 
 
+def _show_fatal_dialog(message: str) -> None:
+    """Surface a Windows native error dialog so the user sees a clear,
+    actionable message instead of the PyInstaller bootloader's cryptic
+    "Failed to load Python DLL" or a silent exit. Best-effort: any
+    failure to display the dialog is swallowed — we'd rather exit
+    cleanly than crash trying to show the error."""
+    if sys.platform != 'win32':
+        return
+    try:
+        import ctypes
+        MB_OK = 0x00000000
+        MB_ICONERROR = 0x00000010
+        MB_SETFOREGROUND = 0x00010000
+        MB_TOPMOST = 0x00040000
+        ctypes.windll.user32.MessageBoxW(
+            None,
+            message,
+            "Groundwork",
+            MB_OK | MB_ICONERROR | MB_SETFOREGROUND | MB_TOPMOST,
+        )
+    except Exception:
+        # MessageBox failure is not actionable from inside the process.
+        pass
+
+
+def _verify_runtime_directory() -> None:
+    """Verify the PyInstaller --runtime-tmpdir location exists and is
+    writable before the agent does anything else. If the bootloader
+    extraction succeeded we're already running (PyInstaller would have
+    crashed pre-Python otherwise), so the "not exists" branch typically
+    only fires when something deletes the dir mid-session (AV quarantine,
+    Disk Cleanup, user nuking AppData). The write-test catches
+    permission corruption — same dir, but ACLs locked us out.
+
+    On any failure: log to groundwork.log, show a Windows MessageBox
+    with actionable guidance, exit(1). Better to die loudly than to
+    spin in a half-broken state where the agent can't write its queue
+    or config but appears to be running."""
+    runtime_dir = RUNTIME_DIR
+    failure_reason: str | None = None
+
+    if not runtime_dir.exists():
+        failure_reason = f"runtime directory missing: {runtime_dir}"
+    else:
+        # Write probe — try creating and removing a tiny test file.
+        probe = runtime_dir / ".write-probe"
+        try:
+            probe.write_text("ok", encoding="utf-8")
+            probe.unlink()
+        except Exception as e:
+            failure_reason = (
+                f"runtime directory not writable ({type(e).__name__}: {e}): {runtime_dir}"
+            )
+
+    if failure_reason is None:
+        return
+
+    # Try to log the failure. Logger may itself be broken if the parent
+    # CONFIG_DIR has the same permission problem, hence the broad
+    # try/except — we'd rather show the dialog than die in the logger.
+    try:
+        log(f"FATAL runtime check failed: {failure_reason}")
+    except Exception:
+        pass
+
+    _show_fatal_dialog(
+        "Groundwork could not start.\n\n"
+        "Please right-click Groundwork.exe and run as administrator, "
+        "or contact your IT administrator.\n\n"
+        f"Detail: {failure_reason}"
+    )
+    sys.exit(1)
+
+
 def main() -> None:
     # --uninstall path: remove the Windows startup registration and exit.
     # The clean shutdown hook for an intentional uninstall — a future
@@ -762,6 +844,13 @@ def main() -> None:
         except Exception as e:
             log(f"uninstall error: {e}")
         sys.exit(0)
+
+    # Runtime-dir sanity check — runs FIRST so a broken extraction
+    # surfaces a clear Windows dialog instead of a silent crash deeper
+    # in the loop. If the bootloader extraction succeeded we're already
+    # running; this check catches mid-session corruption (AV / disk
+    # cleanup / ACL changes) on the persistent runtime dir.
+    _verify_runtime_directory()
 
     log("=" * 60)
     log(f"Groundwork starting (agent v{VERSION})...")

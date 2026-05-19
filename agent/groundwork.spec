@@ -70,7 +70,15 @@ exe = EXE(
     strip=False,
     upx=True,
     upx_exclude=[],
-    runtime_tmpdir=None,
+    # Bootloader extraction target. Default None → %TEMP%\_MEIxxxxxx, a
+    # random folder that Windows / antivirus can purge between launches
+    # or mid-session (manifested as Chloe's "Failed to load Python DLL"
+    # crash in v0.5.5 — _MEI folder was gone by relaunch). The bootloader
+    # expands environment variables at runtime, so this becomes
+    # C:\Users\<user>\AppData\Roaming\Groundwork\runtime — a persistent
+    # location the agent already owns. Bootloader auto-creates the dir
+    # if missing on each launch.
+    runtime_tmpdir='%APPDATA%\\Groundwork\\runtime',
     console=False,          # Silent — no console window on employee machines
     disable_windowed_traceback=False,
     target_arch=None,
