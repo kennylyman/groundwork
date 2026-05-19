@@ -42,9 +42,17 @@ import { loadRateOverrides, resolveRate } from '@/lib/rates'
 import {
   detectSequencesForEmployee,
   scoreSequenceConfidence,
+  SESSION_GAP_MS,
   type CaptureRowForDetection,
   type DetectedSequenceOccurrence,
 } from '@/lib/sequence-detection'
+import {
+  matchAffinity,
+  classifyBottleneck,
+  scoreHandoffConfidence,
+  HANDOFF_WINDOW_MS,
+  HANDOFF_MIN_GAP_MS,
+} from '@/lib/handoffs'
 
 export const maxDuration = 60
 
@@ -848,6 +856,17 @@ async function handle(req: NextRequest) {
       employees as EmployeeRow[]
     )
 
+    // ----- Cross-employee handoff detection -----
+    // Runs after sequences so it can resolve from_sequence_id /
+    // to_sequence_id by looking up which sequence each side's
+    // session-end / session-start capture belongs to. Detects
+    // directional flows where A's last session-capture transitions to
+    // B's first session-capture within the affinity window.
+    const handoffResult = await runHandoffDetection(
+      supabase,
+      employees as EmployeeRow[]
+    )
+
     return NextResponse.json({
       processed_employees: employees.length,
       detected: upserted,
@@ -859,6 +878,7 @@ async function handle(req: NextRequest) {
       },
       multi_employee_patterns: allDetected.filter((o) => o.cross_employee_count > 1).length,
       sequences: sequenceResult,
+      handoffs: handoffResult,
       errors: errors.length ? errors : undefined,
     })
   } catch (err) {
@@ -1150,6 +1170,388 @@ async function upsertSequence(
   }
 
   return true
+}
+
+// ===========================================================================
+// Cross-employee handoff detection (migration 0025)
+// ===========================================================================
+
+const HANDOFF_WINDOW_DAYS = 30
+/** Sentinel for tool/category when the source row had a null value. We
+ *  need a non-null string for the unique constraint key to compare two
+ *  rows as equal. The dashboard renders these as "Unknown". */
+const HANDOFF_NULL_SENTINEL = ''
+
+type SessionEdge = {
+  /** First or last capture of a session — depending on which list this is in. */
+  capture_id: string
+  employee_id: string
+  captured_at: string
+  tool: string | null
+  category: string | null
+}
+
+type HandoffDetectionResult = {
+  candidates_evaluated: number
+  candidates_matched: number
+  rows_written: number
+  bottlenecks_total: number
+  bottlenecks_critical: number
+  errors?: string[]
+}
+
+/**
+ * Per-business handoff detection. For each employee in the business:
+ *   1. Build their per-session ends and per-session starts.
+ *   2. For each session-end of A, find session-starts of B (B ≠ A)
+ *      that fall in (end + HANDOFF_MIN_GAP_MS, end + HANDOFF_WINDOW_MS].
+ *   3. Test the (from_tool, from_category) → (to_tool, to_category)
+ *      pair against the affinity map. First-match wins.
+ *   4. Group candidates by (from_employee, to_employee, from_tool, to_tool)
+ *      and upsert one row per group — rolling avg_gap_minutes, bumped
+ *      occurrence_count, recomputed confidence + bottleneck flag.
+ *
+ * Sequence linking: when sequence detection ran ahead of us, we have
+ * workflow_sequence_steps rows referencing capture_id. We look up the
+ * sequence id for each side's session-edge capture and populate
+ * from_sequence_id / to_sequence_id when available.
+ */
+async function runHandoffDetection(
+  supabase: ReturnType<typeof serverSupabase>,
+  employees: EmployeeRow[]
+): Promise<HandoffDetectionResult> {
+  const result: HandoffDetectionResult = {
+    candidates_evaluated: 0,
+    candidates_matched: 0,
+    rows_written: 0,
+    bottlenecks_total: 0,
+    bottlenecks_critical: 0,
+    errors: [],
+  }
+  if (employees.length === 0) return result
+
+  const windowStart = new Date(
+    Date.now() - HANDOFF_WINDOW_DAYS * 24 * 60 * 60 * 1000
+  ).toISOString()
+
+  // Group employees by business.
+  const byBusiness = new Map<string, EmployeeRow[]>()
+  for (const emp of employees) {
+    const list = byBusiness.get(emp.business_id) ?? []
+    list.push(emp)
+    byBusiness.set(emp.business_id, list)
+  }
+
+  for (const [businessId, emps] of byBusiness) {
+    if (emps.length < 2) continue // need at least two people for a handoff
+    try {
+      const written = await detectHandoffsForBusiness(
+        supabase,
+        businessId,
+        emps,
+        windowStart,
+        result
+      )
+      result.rows_written += written
+    } catch (err) {
+      const message = err instanceof Error ? err.message : 'unknown error'
+      result.errors!.push(`business=${businessId}: ${message}`)
+    }
+  }
+
+  if (result.errors && result.errors.length === 0) delete result.errors
+  return result
+}
+
+async function detectHandoffsForBusiness(
+  supabase: ReturnType<typeof serverSupabase>,
+  businessId: string,
+  emps: EmployeeRow[],
+  windowStartIso: string,
+  result: HandoffDetectionResult
+): Promise<number> {
+  const empIds = emps.map((e) => e.id)
+  const { data: rawCaptures, error } = await supabase
+    .from('captures')
+    .select('id, employee_id, captured_at, software, category')
+    .in('employee_id', empIds)
+    .gte('captured_at', windowStartIso)
+    .order('captured_at', { ascending: true })
+  if (error) throw new Error(`captures fetch failed: ${error.message}`)
+  const captures = (rawCaptures ?? []) as Array<{
+    id: string
+    employee_id: string
+    captured_at: string
+    software: string | null
+    category: string | null
+  }>
+  if (captures.length === 0) return 0
+
+  // Build session-edges per employee: for each employee's chronologically-
+  // sorted captures, mark a capture as a session END if the next capture
+  // from the same employee is > SESSION_GAP_MS away (or it's the last
+  // capture), and a session START if the previous one is similarly far
+  // away (or it's the first capture).
+  const ends: SessionEdge[] = []
+  const starts: SessionEdge[] = []
+  const byEmployee = new Map<string, typeof captures>()
+  for (const c of captures) {
+    const list = byEmployee.get(c.employee_id) ?? []
+    list.push(c)
+    byEmployee.set(c.employee_id, list)
+  }
+  for (const [employeeId, caps] of byEmployee) {
+    for (let i = 0; i < caps.length; i++) {
+      const cur = caps[i]
+      const prev = i > 0 ? caps[i - 1] : null
+      const next = i < caps.length - 1 ? caps[i + 1] : null
+      const prevGap = prev
+        ? new Date(cur.captured_at).getTime() - new Date(prev.captured_at).getTime()
+        : Number.POSITIVE_INFINITY
+      const nextGap = next
+        ? new Date(next.captured_at).getTime() - new Date(cur.captured_at).getTime()
+        : Number.POSITIVE_INFINITY
+      const isStart = prevGap > SESSION_GAP_MS
+      const isEnd = nextGap > SESSION_GAP_MS
+      if (isStart) {
+        starts.push({
+          capture_id: cur.id,
+          employee_id: employeeId,
+          captured_at: cur.captured_at,
+          tool: cur.software,
+          category: cur.category,
+        })
+      }
+      if (isEnd) {
+        ends.push({
+          capture_id: cur.id,
+          employee_id: employeeId,
+          captured_at: cur.captured_at,
+          tool: cur.software,
+          category: cur.category,
+        })
+      }
+    }
+  }
+  // Sort starts by time so we can binary-search the window.
+  starts.sort((a, b) =>
+    a.captured_at < b.captured_at ? -1 : a.captured_at > b.captured_at ? 1 : 0
+  )
+  ends.sort((a, b) =>
+    a.captured_at < b.captured_at ? -1 : a.captured_at > b.captured_at ? 1 : 0
+  )
+
+  // For each session END of employee A, find session STARTs of any
+  // B ≠ A within the affinity window. Linear scan with a sliding-
+  // window pointer is fine — both arrays are sorted by time.
+  type Candidate = {
+    fromEmployee: string
+    toEmployee: string
+    fromTool: string
+    toTool: string
+    fromCategory: string
+    toCategory: string
+    fromCaptureId: string
+    toCaptureId: string
+    handoffAt: string
+    gapMs: number
+    rule: ReturnType<typeof matchAffinity>
+  }
+  const candidates: Candidate[] = []
+  let startIdx = 0 // pointer into starts for the lower bound
+  for (const end of ends) {
+    const endMs = new Date(end.captured_at).getTime()
+    const windowLo = endMs + HANDOFF_MIN_GAP_MS
+    const windowHi = endMs + HANDOFF_WINDOW_MS
+    // Advance startIdx past anything before windowLo.
+    while (
+      startIdx < starts.length &&
+      new Date(starts[startIdx].captured_at).getTime() < windowLo
+    ) {
+      startIdx++
+    }
+    for (let j = startIdx; j < starts.length; j++) {
+      const s = starts[j]
+      const sMs = new Date(s.captured_at).getTime()
+      if (sMs > windowHi) break // beyond window — no later start qualifies either
+      if (s.employee_id === end.employee_id) continue // same person, not a handoff
+      result.candidates_evaluated += 1
+      const match = matchAffinity(end.tool, end.category, s.tool, s.category)
+      if (!match) continue
+      result.candidates_matched += 1
+      candidates.push({
+        fromEmployee: end.employee_id,
+        toEmployee: s.employee_id,
+        fromTool: end.tool ?? HANDOFF_NULL_SENTINEL,
+        toTool: s.tool ?? HANDOFF_NULL_SENTINEL,
+        fromCategory: end.category ?? HANDOFF_NULL_SENTINEL,
+        toCategory: s.category ?? HANDOFF_NULL_SENTINEL,
+        fromCaptureId: end.capture_id,
+        toCaptureId: s.capture_id,
+        handoffAt: s.captured_at,
+        gapMs: sMs - endMs,
+        rule: match,
+      })
+    }
+  }
+
+  if (candidates.length === 0) return 0
+
+  // Resolve sequence ids for the participating captures so we can
+  // populate from_sequence_id / to_sequence_id when those captures
+  // belong to detected sequences.
+  const allCaptureIds = Array.from(
+    new Set(candidates.flatMap((c) => [c.fromCaptureId, c.toCaptureId]))
+  )
+  const sequenceIdByCapture = new Map<string, string>()
+  if (allCaptureIds.length > 0) {
+    const { data: stepRows } = await supabase
+      .from('workflow_sequence_steps')
+      .select('capture_id, sequence_id')
+      .in('capture_id', allCaptureIds)
+    for (const r of stepRows ?? []) {
+      // A capture can be a step in only one sequence at a time, but the
+      // join could theoretically return multiple rows over time — first
+      // hit wins, the rest are dups.
+      if (!sequenceIdByCapture.has(r.capture_id)) {
+        sequenceIdByCapture.set(r.capture_id, r.sequence_id)
+      }
+    }
+  }
+
+  // Group candidates by the unique key, then upsert per group.
+  type GroupKey = string
+  const groups = new Map<GroupKey, Candidate[]>()
+  for (const c of candidates) {
+    const key = `${c.fromEmployee}::${c.toEmployee}::${c.fromTool}::${c.toTool}`
+    const list = groups.get(key) ?? []
+    list.push(c)
+    groups.set(key, list)
+  }
+
+  let written = 0
+  for (const [, list] of groups) {
+    // Per-row aggregates for THIS run.
+    const newOccurrences = list.length
+    const gapsMs = list.map((c) => c.gapMs)
+    const latest = list.reduce((acc, c) =>
+      c.handoffAt > acc.handoffAt ? c : acc
+    )
+
+    const sample = list[0]
+    const rule = sample.rule!.rule
+
+    // Find any existing row to merge with.
+    const fromTool = sample.fromTool
+    const toTool = sample.toTool
+    const { data: existing, error: lookupErr } = await supabase
+      .from('workflow_handoffs')
+      .select('id, occurrence_count, avg_gap_minutes')
+      .eq('business_id', businessId)
+      .eq('from_employee_id', sample.fromEmployee)
+      .eq('to_employee_id', sample.toEmployee)
+      .eq('from_tool', fromTool)
+      .eq('to_tool', toTool)
+      .maybeSingle()
+    if (lookupErr) {
+      console.error('handoff: existing lookup failed', lookupErr)
+      continue
+    }
+
+    // Rolling average: existing.avg_gap × existing.count + sum(new gaps)
+    // all divided by total observations. The gaps are minutes; convert
+    // from ms.
+    const newGapsMin = gapsMs.map((g) => g / 60000)
+    const totalCount = (existing?.occurrence_count ?? 0) + newOccurrences
+    const existingWeight =
+      (existing?.avg_gap_minutes ?? 0) * (existing?.occurrence_count ?? 0)
+    const newSum = newGapsMin.reduce((a, b) => a + b, 0)
+    const avgGapMinutes = totalCount > 0 ? (existingWeight + newSum) / totalCount : 0
+
+    // Coefficient of variation across NEW observations only — we don't
+    // persist per-gap history. Good enough for the regularity heuristic.
+    let gapCv: number | null = null
+    if (newGapsMin.length >= 2) {
+      const mean = newGapsMin.reduce((a, b) => a + b, 0) / newGapsMin.length
+      if (mean > 0) {
+        const variance =
+          newGapsMin.reduce((a, g) => a + Math.pow(g - mean, 2), 0) /
+          newGapsMin.length
+        gapCv = Math.sqrt(variance) / mean
+      }
+    }
+
+    const confidence = scoreHandoffConfidence({
+      occurrenceCount: totalCount,
+      strength: rule.strength,
+      gapCv,
+    })
+
+    const { isBottleneck, isCritical } = classifyBottleneck({
+      avgGapMinutes,
+      occurrenceCount: totalCount,
+    })
+    if (isBottleneck) result.bottlenecks_total += 1
+    if (isCritical) result.bottlenecks_critical += 1
+
+    const fromSequenceId =
+      sequenceIdByCapture.get(latest.fromCaptureId) ?? null
+    const toSequenceId =
+      sequenceIdByCapture.get(latest.toCaptureId) ?? null
+
+    if (existing) {
+      const { error: updErr } = await supabase
+        .from('workflow_handoffs')
+        .update({
+          occurrence_count: totalCount,
+          avg_gap_minutes: avgGapMinutes,
+          gap_minutes: Math.round(latest.gapMs / 60000),
+          handoff_at: latest.handoffAt,
+          last_seen_at: latest.handoffAt,
+          confidence_score: confidence,
+          is_bottleneck: isBottleneck,
+          from_sequence_id: fromSequenceId,
+          to_sequence_id: toSequenceId,
+          from_category: sample.fromCategory || null,
+          to_category: sample.toCategory || null,
+          task_context: rule.contextLabel,
+          updated_at: new Date().toISOString(),
+        })
+        .eq('id', existing.id)
+      if (updErr) {
+        console.error('handoff: update failed', updErr)
+        continue
+      }
+    } else {
+      const { error: insErr } = await supabase
+        .from('workflow_handoffs')
+        .insert({
+          business_id: businessId,
+          from_employee_id: sample.fromEmployee,
+          to_employee_id: sample.toEmployee,
+          from_tool: fromTool,
+          to_tool: toTool,
+          from_category: sample.fromCategory || null,
+          to_category: sample.toCategory || null,
+          handoff_at: latest.handoffAt,
+          last_seen_at: latest.handoffAt,
+          gap_minutes: Math.round(latest.gapMs / 60000),
+          avg_gap_minutes: avgGapMinutes,
+          occurrence_count: totalCount,
+          confidence_score: confidence,
+          is_bottleneck: isBottleneck,
+          task_context: rule.contextLabel,
+          from_sequence_id: fromSequenceId,
+          to_sequence_id: toSequenceId,
+        })
+      if (insErr) {
+        console.error('handoff: insert failed', insErr)
+        continue
+      }
+    }
+    written += 1
+  }
+  return written
 }
 
 export const GET = handle

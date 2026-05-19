@@ -8,6 +8,10 @@ import Link from 'next/link'
 import { PauseToggle, PausedBadge } from '@/components/PauseToggle'
 import { OpportunitiesTable } from '@/components/OpportunitiesTable'
 import { WorkflowSequencesPanel } from '@/components/WorkflowSequencesPanel'
+import {
+  WorkflowHandoffsPanel,
+  CriticalHandoffBanner,
+} from '@/components/WorkflowHandoffsPanel'
 import { ConnectionPrompts } from '@/components/ConnectionPrompts'
 import { WorkflowIntelligenceMap } from '@/components/WorkflowIntelligenceMap'
 import { SignOutButton } from '@/components/SignOutButton'
@@ -372,6 +376,12 @@ export default function Dashboard() {
             Renders nothing when there are no qualifying tools. */}
         <ConnectionPrompts />
 
+        {/* Critical handoff bottlenecks — surfaces ABOVE the opportunities
+            panel per spec. Only renders when there's at least one critical
+            row (avg gap > 4hrs, occ >= 3). Owners need to see these
+            first because they're the highest-value automation targets. */}
+        <CriticalHandoffBanner />
+
         {/* Opportunities — surface highest-leverage detected patterns first */}
         <div className="mb-8">
           <OpportunitiesTable />
@@ -384,6 +394,14 @@ export default function Dashboard() {
             doing what right now." */}
         <div className="mb-8">
           <WorkflowSequencesPanel />
+        </div>
+
+        {/* Workflow handoffs — cross-employee transitions. Bottlenecks here
+            often surface the same problems as the opportunities panel but
+            from a different angle: where work IS sitting rather than where
+            it COULD be automated. */}
+        <div className="mb-8">
+          <WorkflowHandoffsPanel />
         </div>
 
         {/* Employee Table */}
