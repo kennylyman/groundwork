@@ -307,18 +307,24 @@ REM The .new.exe in APPDATA was the source for the stage; we copied
 REM not moved, so it's still there. Remove it now that the swap is done.
 del /F /Q "%NEW_EXE%" >nul 2>&1
 
-REM --- Watchdog: confirm the new agent is alive 30s after launch ---------
-timeout /t 30 /nobreak >nul
-tasklist /FI "IMAGENAME eq Groundwork.exe" 2>nul | find /i "Groundwork.exe" >nul
-if !errorlevel! neq 0 (
-    echo [%date% %time%] new agent did not survive — rolling back >> "%LOG%"
-    REM Move the failing exe aside so the agent's startup orphan cleanup
-    REM can see it; then restore the backup via atomic move.
-    if exist "%OLD_EXE%" move /Y "%OLD_EXE%" "%~1.failed" >nul 2>&1
-    move /Y "%BACKUP_EXE%" "%OLD_EXE%" >nul 2>&1
-    start "" "%OLD_EXE%"
-    exit /b 1
-)
+REM Updater exits immediately after launching the new agent. We DELIBERATELY
+REM removed the post-launch watchdog ("wait 30s, tasklist | find") in v0.5.7
+REM because cmd.exe's CREATE_NO_WINDOW flag doesn't cover its child console
+REM processes — tasklist and find each allocate their own console window,
+REM which surfaced to users as a black popup titled "find /i Groundwork.exe"
+REM during the 30-second wait. JoAnn Lyman's install hit this on day-1.
+REM
+REM The auto-rollback that watchdog enabled is now handled passively:
+REM   - If the new agent exe fails to start (PyInstaller extraction error,
+REM     missing DLL, etc), it leaves no .failed artifact — the user just
+REM     sees nothing happen and tells us. They then re-install from the
+REM     team page, which redownloads the latest from GitHub releases.
+REM   - cleanup_update_orphans() on every agent startup still reaps
+REM     <exe>.new and <exe>.failed and agent.new.exe stragglers so disk
+REM     state stays clean.
+REM   - The PyInstaller persistent-runtime fix shipped in v0.5.6 already
+REM     eliminated the most common failure mode the watchdog was guarding
+REM     against (random %TEMP% extraction failures).
 
 echo [%date% %time%] update succeeded >> "%LOG%"
 exit /b 0
