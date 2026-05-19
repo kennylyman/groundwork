@@ -38,7 +38,20 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install pyinstaller anthropic supabase mss pillow pynput cryptography python-dotenv psutil pywin32 pywinauto pytz
+          pip install pytest pyinstaller anthropic supabase mss pillow pynput cryptography python-dotenv psutil pywin32 pywinauto pytz
+
+      # Hard gate: any failing test aborts the build before PyInstaller
+      # runs. No .env is materialized, no artifact is uploaded, no
+      # GitHub release is created, no agent_releases row is inserted.
+      # The fleet only ever sees a release that passed every test.
+      #
+      # Runs on windows-latest so the winreg-mocked tests in
+      # test_startup_registration.py actually execute (they're skipped
+      # on the macOS dev box). pytest auto-discovers unittest.TestCase
+      # classes, so the existing tests don't need rewriting.
+      - name: Run agent tests
+        working-directory: agent
+        run: python -m pytest tests/ -v
 
       - name: Create .env file from secrets
         shell: powershell
