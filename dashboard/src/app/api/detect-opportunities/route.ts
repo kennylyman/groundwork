@@ -5,18 +5,30 @@
  * Trigger paths:
  *   - Vercel cron (vercel.json schedule). Requires CRON_SECRET header.
  *   - Manual: GET or POST with optional ?employee_id= to scope to one person.
+ *   - Rescore: POST with ?rescore=true (or ?cleanup=true) re-evaluates
+ *     every existing row in scope against the current rules and deletes
+ *     anything that no longer qualifies. Preserves status on rows that
+ *     survive.
  *
- * Algorithm (Phase 1 — single-capability frequency):
- *   1. Pull active employees per business.
- *   2. For each employee, fetch their captures from the last 7 days that
- *      have at least one capability tag.
- *   3. Group capability tag occurrences by (capability_id + key_params).
- *   4. Any group with >= MIN_OCCURRENCES is an opportunity candidate.
- *   5. Score + UPSERT by pattern_signature.
+ * Dual-track scoring (v2):
  *
- * Multi-capability sequence detection (e.g., "lookup → transfer → notify
- * appearing 3+ times in order") is a future enhancement — Phase 1 ships
- * with the simpler version.
+ *   Track 1 — "high_frequency"   daily / multi-times-per-week patterns
+ *     ≥ 5 observations
+ *     ≥ 3 days span between first and last observation
+ *     ≥ 0.75 confidence (freq * 0.6 + tag * 0.4 scoring)
+ *
+ *   Track 2 — "recurring"        weekly / biweekly / monthly periodic
+ *                                business processes
+ *     ≥ 2 observations
+ *     ≥ 7 days span (rules out "happened twice in one session")
+ *     ≥ 0.80 confidence (tag-centric scoring with regularity boost)
+ *     Category or task must match a periodic-process keyword
+ *     Cadence estimated from average interval and surfaced on the card
+ *
+ *   Cross-employee weighting (both tracks):
+ *     After per-employee detection, the same (capability_id, key_params)
+ *     signature is counted across employees. cross_employee_count >= 2
+ *     gets a confidence boost and surfaces as "Done by N people" in the UI.
  */
 
 import { NextRequest, NextResponse } from 'next/server'
@@ -32,23 +44,82 @@ export const maxDuration = 60
 
 // ----- Tunables ------------------------------------------------------------
 
-const WINDOW_DAYS = 7
+// Detection window — 30 days so Track 2 patterns (which need a 7-day
+// minimum span) have room to fire. Track 1 still only uses recent data
+// for its observation count.
+const WINDOW_DAYS = 30
 const CAPTURE_INTERVAL_SECONDS = 30
-const MIN_OCCURRENCES = 3
 const WORKING_DAYS_PER_YEAR = 250
 
+// Track 1 — high-frequency thresholds. Tightened from the v1 floor of
+// MIN_OCCURRENCES = 3 because 3 hits in 3 hours of data was generating
+// 40+ noise opportunities per employee in early testing.
+const TRACK1_MIN_OBS = 5
+const TRACK1_MIN_SPAN_DAYS = 3
+const TRACK1_MIN_CONFIDENCE = 0.75
+
+// Track 2 — recurring-pattern thresholds. The 7-day minimum span is the
+// key distinguisher: it rules out "the user did this twice in one
+// session" while still letting a monthly task surface after the second
+// occurrence. Higher confidence floor (0.80) compensates for the
+// smaller observation count.
+const TRACK2_MIN_OBS = 2
+const TRACK2_MIN_SPAN_DAYS = 7
+const TRACK2_MIN_CONFIDENCE = 0.8
+
+// Cadence buckets — average interval between observations falls into one.
+const CADENCE_BUCKETS: Array<{
+  cadence: 'weekly' | 'biweekly' | 'monthly'
+  minDays: number
+  maxDays: number
+  label: string
+}> = [
+  { cadence: 'weekly', minDays: 1, maxDays: 9, label: 'Appears weekly' },
+  { cadence: 'biweekly', minDays: 10, maxDays: 20, label: 'Appears biweekly' },
+  { cadence: 'monthly', minDays: 21, maxDays: 45, label: 'Appears monthly' },
+]
+
+// Periodic-business-process gate for Track 2. The detected pattern must
+// have AT LEAST ONE underlying capture whose category or task text
+// suggests a real recurring business process. Without this gate,
+// "switched between Outlook and Chrome twice 7 days apart" would
+// qualify as a Track 2 opportunity — which is meaningless noise.
+const RECURRING_CATEGORIES = new Set([
+  'Billing and Invoicing',
+  'Payroll Processing',
+  'Reporting and Documentation',
+  'Authorization and Compliance',
+])
+const RECURRING_TASK_KEYWORDS = [
+  'billing',
+  'payroll',
+  'invoice',
+  'invoicing',
+  'royalt', // royalty / royalties
+  'compliance',
+  'report',
+  'reporting',
+  'statement',
+  'reconcile',
+  'reconciliation',
+  'audit',
+  'month-end',
+  'quarter-end',
+  'year-end',
+  'tax filing',
+]
+
+// Cross-employee boost: a pattern that N people perform is N× stronger
+// signal than one person's habit. We bump confidence by 0.05 per
+// additional employee, capped so cross-employee evidence can never
+// single-handedly carry confidence past the threshold.
+const CROSS_EMPLOYEE_BOOST_PER = 0.05
+const CROSS_EMPLOYEE_BOOST_CAP = 0.15
+
 // Assume well-tuned automations recover ~70% of the time spent on the task.
-// Conservative — we'd rather under-promise.
 const SAVINGS_RATE = 0.7
 
-// Rate resolution shares lib/rates with /api/generate-intelligence so the two
-// views never disagree on dollar figures. Owner overrides come from
-// business_profiles.role_hourly_rates (via /settings/pricing).
-
-// Keys we hash into the pattern signature — these are the ones that
-// distinguish two opportunities of the same capability. Everything else
-// (free-text descriptions, etc.) is *not* hashed, so minor wording
-// variations don't fork the same opportunity into two rows.
+// Keys we hash into the pattern signature.
 const SIGNATURE_PARAM_KEYS = ['source', 'destination', 'tool', 'target', 'app']
 
 // ----- Types ---------------------------------------------------------------
@@ -65,6 +136,8 @@ type CaptureRow = {
   employee_id: string
   captured_at: string
   capabilities: CapabilityTag[] | null
+  category: string | null
+  task: string | null
 }
 
 type EmployeeRow = {
@@ -72,6 +145,23 @@ type EmployeeRow = {
   business_id: string
   role: string | null
   is_active: boolean
+}
+
+type DetectionTrack = 'high_frequency' | 'recurring'
+
+type Observation = {
+  capture_id: string
+  captured_at: string
+  confidence: number
+  category: string | null
+  task: string | null
+}
+
+type Bucket = {
+  capabilityId: string
+  keyParams: Record<string, string>
+  observations: Observation[]
+  fullParamsExample: Record<string, unknown>
 }
 
 type DetectedOpportunity = {
@@ -87,25 +177,23 @@ type DetectedOpportunity = {
   estimated_annual_savings: number
   confidence: number
   automation_class: 'A' | 'B' | 'C'
+  detection_track: DetectionTrack
+  estimated_cadence: 'weekly' | 'biweekly' | 'monthly' | null
+  cross_employee_count: number
   last_seen_at: string
 }
 
 // ----- Helpers -------------------------------------------------------------
 
 function authorized(req: NextRequest): boolean {
-  // Cron path: header set by vercel.json schedule
   const cronHeader = req.headers.get('authorization')
   const cronSecret = process.env.CRON_SECRET
   if (cronSecret && cronHeader === `Bearer ${cronSecret}`) return true
-
-  // Otherwise: allow if not in production, so devs can poke at it.
   if (process.env.VERCEL_ENV !== 'production') return true
-
   return false
 }
 
 function normalizeParams(params: Record<string, unknown> | undefined) {
-  // Lowercase + trim string values, keep only the keys we hash.
   if (!params) return {}
   const out: Record<string, string> = {}
   for (const k of SIGNATURE_PARAM_KEYS) {
@@ -131,14 +219,25 @@ function patternSignature(
   return crypto.createHash('sha256').update(raw).digest('hex')
 }
 
+/** Signature shared across employees — drops employee_id. Used for the
+ *  cross-employee aggregation pass. */
+function crossEmployeeKey(
+  capabilityId: string,
+  keyParams: Record<string, string>
+): string {
+  const sortedParams = Object.keys(keyParams)
+    .sort()
+    .map((k) => `${k}=${keyParams[k]}`)
+    .join('|')
+  return `${capabilityId}::${sortedParams}`
+}
+
 function describePattern(
   capabilityId: string,
   params: Record<string, string>,
-  capabilitiesById: Record<string, Capability>
-): {
-  title: string
-  description: string
-} {
+  capabilitiesById: Record<string, Capability>,
+  track: DetectionTrack
+): { title: string; description: string } {
   const label = capabilitiesById[capabilityId]?.label ?? capabilityId
   const bits: string[] = []
   if (params.source) bits.push(`from ${params.source}`)
@@ -147,17 +246,14 @@ function describePattern(
   if (params.target && !bits.length) bits.push(`on ${params.target}`)
   if (params.app && !bits.length) bits.push(`using ${params.app}`)
   const suffix = bits.length ? ' ' + bits.join(' ') : ''
-  return {
-    title: `${label}${suffix}`,
-    description: `Repeated pattern detected in the last ${WINDOW_DAYS} days.`,
-  }
+  const description =
+    track === 'recurring'
+      ? `Recurring business process detected across multiple cycles in the last ${WINDOW_DAYS} days.`
+      : `Repeated pattern detected in the last ${WINDOW_DAYS} days.`
+  return { title: `${label}${suffix}`, description }
 }
 
 function automationClassFor(capability: Capability | undefined): 'A' | 'B' | 'C' {
-  // Phase 1 heuristic: anything in the data.* / communication.send.* /
-  // monitoring.* namespaces is Zapier-able (Class A). Workflow ops and
-  // admin.* tend to need a composed agent (Class B). Everything else
-  // automatable but un-categorized falls to Class C.
   if (!capability?.automatable) return 'C'
   const id = capability.id
   if (
@@ -172,16 +268,141 @@ function automationClassFor(capability: Capability | undefined): 'A' | 'B' | 'C'
   return 'C'
 }
 
-function scoreConfidence(
+// ----- Scoring -------------------------------------------------------------
+
+/**
+ * Track 1 scoring — frequency-weighted. Same formula as v1: log-damped
+ * occurrence count + tag confidence average.
+ */
+function scoreTrack1(
   occurrenceCount: number,
   avgTagConfidence: number
 ): number {
-  // log1p damps runaway counts; clamp 0..1.
-  // 50 occurrences ~ 3.93/4.61 saturation, 3 occurrences ~ 1.39/4.61
   const freqScore = Math.log1p(occurrenceCount) / Math.log1p(50)
   const tagScore = Math.min(1, Math.max(0, avgTagConfidence / 100))
   const combined = freqScore * 0.6 + tagScore * 0.4
-  return Math.round(Math.min(1, Math.max(0, combined)) * 1000) / 1000
+  return clamp01(combined)
+}
+
+/**
+ * Track 2 scoring — tag-centric with a regularity boost. Low-frequency
+ * patterns can't earn confidence through observation count, so we rely
+ * on (a) the LLM's per-capture tag confidence and (b) how clean the
+ * cadence is. A perfectly-spaced "monthly" pattern with high tag
+ * confidence scores higher than a sporadic one.
+ */
+function scoreTrack2(
+  avgTagConfidence: number,
+  observations: Observation[]
+): number {
+  const tagScore = Math.min(1, Math.max(0, avgTagConfidence / 100))
+  let regularityBoost = 0
+  if (observations.length >= 3) {
+    const sorted = [...observations]
+      .map((o) => new Date(o.captured_at).getTime())
+      .sort((a, b) => a - b)
+    const intervals: number[] = []
+    for (let i = 1; i < sorted.length; i++) intervals.push(sorted[i] - sorted[i - 1])
+    const mean = intervals.reduce((a, b) => a + b, 0) / intervals.length
+    if (mean > 0) {
+      const variance =
+        intervals.reduce((a, i) => a + Math.pow(i - mean, 2), 0) / intervals.length
+      const cv = Math.sqrt(variance) / mean // coefficient of variation
+      // Clean cadence (low CV) → up to +0.10. Random spacing → no boost.
+      regularityBoost = Math.max(0, 0.1 * (1 - Math.min(1, cv)))
+    }
+  }
+  return clamp01(tagScore + regularityBoost)
+}
+
+function clamp01(x: number): number {
+  return Math.round(Math.min(1, Math.max(0, x)) * 1000) / 1000
+}
+
+// ----- Bucket evaluation ---------------------------------------------------
+
+function spanDays(observations: Observation[]): number {
+  if (observations.length < 2) return 0
+  const times = observations.map((o) => new Date(o.captured_at).getTime())
+  const min = Math.min(...times)
+  const max = Math.max(...times)
+  return (max - min) / (24 * 60 * 60 * 1000)
+}
+
+function avgTagConfidence(observations: Observation[]): number {
+  if (observations.length === 0) return 0
+  return (
+    observations.reduce((s, o) => s + (o.confidence || 0), 0) / observations.length
+  )
+}
+
+function bucketMatchesRecurringProcess(b: Bucket): boolean {
+  for (const obs of b.observations) {
+    if (obs.category && RECURRING_CATEGORIES.has(obs.category)) return true
+    if (obs.task) {
+      const lc = obs.task.toLowerCase()
+      for (const kw of RECURRING_TASK_KEYWORDS) {
+        if (lc.includes(kw)) return true
+      }
+    }
+  }
+  return false
+}
+
+function estimateCadence(
+  observations: Observation[]
+): { cadence: 'weekly' | 'biweekly' | 'monthly' | null; avgDays: number } {
+  if (observations.length < 2) return { cadence: null, avgDays: 0 }
+  const times = observations
+    .map((o) => new Date(o.captured_at).getTime())
+    .sort((a, b) => a - b)
+  let total = 0
+  for (let i = 1; i < times.length; i++) total += times[i] - times[i - 1]
+  const avgMs = total / (times.length - 1)
+  const avgDays = avgMs / (24 * 60 * 60 * 1000)
+  for (const bucket of CADENCE_BUCKETS) {
+    if (avgDays >= bucket.minDays && avgDays <= bucket.maxDays) {
+      return { cadence: bucket.cadence, avgDays }
+    }
+  }
+  return { cadence: null, avgDays }
+}
+
+type TrackResult = {
+  track: DetectionTrack
+  confidence: number
+  cadence: 'weekly' | 'biweekly' | 'monthly' | null
+  cadenceAvgDays: number
+} | null
+
+/**
+ * Evaluate a bucket against both tracks. Prefer Track 1 when both apply
+ * (higher-frequency signal is stronger). Returns null when nothing matches.
+ */
+function evaluateBucket(b: Bucket): TrackResult {
+  const occ = b.observations.length
+  const span = spanDays(b.observations)
+  const avgConf = avgTagConfidence(b.observations)
+
+  // Track 1 first.
+  if (occ >= TRACK1_MIN_OBS && span >= TRACK1_MIN_SPAN_DAYS) {
+    const conf = scoreTrack1(occ, avgConf)
+    if (conf >= TRACK1_MIN_CONFIDENCE) {
+      return { track: 'high_frequency', confidence: conf, cadence: null, cadenceAvgDays: 0 }
+    }
+  }
+
+  // Track 2.
+  if (occ >= TRACK2_MIN_OBS && span >= TRACK2_MIN_SPAN_DAYS) {
+    if (!bucketMatchesRecurringProcess(b)) return null
+    const conf = scoreTrack2(avgConf, b.observations)
+    if (conf >= TRACK2_MIN_CONFIDENCE) {
+      const { cadence, avgDays } = estimateCadence(b.observations)
+      return { track: 'recurring', confidence: conf, cadence, cadenceAvgDays: avgDays }
+    }
+  }
+
+  return null
 }
 
 // ----- Core detection ------------------------------------------------------
@@ -193,14 +414,6 @@ type IntegrationEventSummary = {
   last_event_at: string
 }
 
-/**
- * Pull recent Zapier-style events for a business, grouped by tool. The
- * scorer uses these to BOOST CONFIDENCE on capability buckets whose
- * params reference a tool with active events — events are harder evidence
- * than capture inference. We deliberately don't inflate occurrence_count
- * or estimated_weekly_minutes from events, so dollar figures stay
- * grounded in observed time.
- */
 async function loadEventsByTool(
   supabase: ReturnType<typeof serverSupabase>,
   businessId: string,
@@ -211,12 +424,10 @@ async function loadEventsByTool(
     .select('tool_name, event_type, occurred_at')
     .eq('business_id', businessId)
     .gte('occurred_at', windowStartIso)
-
   if (error) {
     console.error('detect-opportunities: integration_events read failed', error)
     return new Map()
   }
-
   const byTool = new Map<string, IntegrationEventSummary>()
   for (const row of data ?? []) {
     const tool = (row.tool_name || '').toLowerCase()
@@ -252,7 +463,7 @@ async function detectForEmployee(
 ): Promise<DetectedOpportunity[]> {
   const { data: captures, error } = await supabase
     .from('captures')
-    .select('id, business_id, employee_id, captured_at, capabilities')
+    .select('id, business_id, employee_id, captured_at, capabilities, category, task')
     .eq('employee_id', employee.id)
     .gte('captured_at', windowStartIso)
     .not('capabilities', 'is', null)
@@ -260,74 +471,100 @@ async function detectForEmployee(
   if (error) throw new Error(`captures fetch failed: ${error.message}`)
   if (!captures || captures.length === 0) return []
 
-  // Bucket tag occurrences by (capability_id + key_params).
-  type Bucket = {
-    capabilityId: string
-    keyParams: Record<string, string>
-    occurrenceCount: number
-    confidenceSum: number
-    representativeCaptureIds: string[]
-    lastSeenAt: string
-    fullParamsExample: Record<string, unknown>
-  }
+  // Bucket per-observation rather than just counting — Track 2 needs
+  // per-occurrence timestamps + categories.
   const buckets = new Map<string, Bucket>()
-
   for (const cap of captures as CaptureRow[]) {
     const tags = Array.isArray(cap.capabilities) ? cap.capabilities : []
     for (const tag of tags) {
       if (!tag || typeof tag.id !== 'string') continue
       const taxonomyEntry = capabilitiesById[tag.id]
-      if (!taxonomyEntry?.automatable) continue // skip non-automatable tags
+      if (!taxonomyEntry?.automatable) continue
 
       const keyParams = normalizeParams(tag.params as Record<string, unknown>)
       const sig = `${tag.id}::${JSON.stringify(keyParams)}`
 
+      const obs: Observation = {
+        capture_id: cap.id,
+        captured_at: cap.captured_at,
+        confidence: tag.confidence ?? 0,
+        category: cap.category ?? null,
+        task: cap.task ?? null,
+      }
+
       const existing = buckets.get(sig)
       if (existing) {
-        existing.occurrenceCount += 1
-        existing.confidenceSum += tag.confidence ?? 0
-        existing.lastSeenAt =
-          cap.captured_at > existing.lastSeenAt ? cap.captured_at : existing.lastSeenAt
-        if (existing.representativeCaptureIds.length < 5) {
-          existing.representativeCaptureIds.push(cap.id)
-        }
+        existing.observations.push(obs)
       } else {
         buckets.set(sig, {
           capabilityId: tag.id,
           keyParams,
-          occurrenceCount: 1,
-          confidenceSum: tag.confidence ?? 0,
-          representativeCaptureIds: [cap.id],
-          lastSeenAt: cap.captured_at,
+          observations: [obs],
           fullParamsExample: (tag.params as Record<string, unknown>) ?? {},
         })
       }
     }
   }
 
-  // Convert buckets to opportunities.
   const hourlyRate = resolveRate(employee.role, rateOverrides)
   const out: DetectedOpportunity[] = []
 
   for (const b of buckets.values()) {
-    if (b.occurrenceCount < MIN_OCCURRENCES) continue
-
+    const evaluation = evaluateBucket(b)
+    if (!evaluation) continue
     const taxonomyEntry = capabilitiesById[b.capabilityId]
     if (!taxonomyEntry) continue
 
-    const observedMinutes = (b.occurrenceCount * CAPTURE_INTERVAL_SECONDS) / 60
-    const observedHoursPerWeek = observedMinutes / 60
-    const annualHours = observedHoursPerWeek * (WORKING_DAYS_PER_YEAR / 5) // assume 5 working days/week observation
+    const occurrenceCount = b.observations.length
+    const lastSeenAt = b.observations.reduce(
+      (max, o) => (o.captured_at > max ? o.captured_at : max),
+      b.observations[0].captured_at
+    )
+
+    // Observed time math is unchanged for Track 1; for Track 2 it's
+    // intentionally not annualized from a 30-day window (a single
+    // monthly task observed twice ≠ "happens 24× per year"). Instead
+    // we trust the cadence estimate: cadence='monthly' → 12 occurrences/yr.
+    let annualOccurrences: number
+    if (evaluation.track === 'high_frequency') {
+      // Frequency-based annualization (same as v1, but window-corrected).
+      const observedWeeks = WINDOW_DAYS / 7
+      annualOccurrences = (occurrenceCount / observedWeeks) * 52
+    } else {
+      // Cadence-based annualization.
+      switch (evaluation.cadence) {
+        case 'weekly':
+          annualOccurrences = 52
+          break
+        case 'biweekly':
+          annualOccurrences = 26
+          break
+        case 'monthly':
+          annualOccurrences = 12
+          break
+        default:
+          // Cadence didn't fit a bucket cleanly but still passed Track 2
+          // (multi-month gaps). Conservative: assume quarterly.
+          annualOccurrences = 4
+      }
+    }
+
+    const minutesPerOccurrence = CAPTURE_INTERVAL_SECONDS / 60
+    const observedMinutesInWindow = occurrenceCount * minutesPerOccurrence
+    const annualMinutes = annualOccurrences * minutesPerOccurrence
+    const annualHours = annualMinutes / 60
     const annualCost = Math.round(annualHours * hourlyRate)
     const annualSavings = Math.round(annualCost * SAVINGS_RATE)
+    // estimated_weekly_minutes preserves the column's column meaning —
+    // observed minutes per week of activity. For Track 2 we report the
+    // annualized estimate divided by 52 so dashboards aren't confused
+    // by a single-occurrence-shown-as-weekly figure.
+    const estimatedWeeklyMinutes = Math.round(annualMinutes / 52)
 
-    const avgConf = b.occurrenceCount > 0 ? b.confidenceSum / b.occurrenceCount : 0
-    let confidence = scoreConfidence(b.occurrenceCount, avgConf)
+    let confidence = evaluation.confidence
 
-    // Integration-event boost: if any tool referenced in this bucket's
-    // key_params has Zapier events in the window, raise confidence.
-    // The boost is capped — events are corroboration, not new evidence
-    // of cost (we don't touch occurrence_count or savings).
+    // Integration-event boost: events corroborate the capture-based
+    // inference. Cap so events alone can't push past the threshold.
     const toolsInPattern = Object.values(b.keyParams).filter(
       (v): v is string => typeof v === 'string' && v.length > 0
     )
@@ -339,10 +576,8 @@ async function detectForEmployee(
     let integrationEvidence: Record<string, unknown> | null = null
     if (matchedEvents.length > 0) {
       const totalEvents = matchedEvents.reduce((s, e) => s + e.event_count, 0)
-      // Cap the bump at +0.20 confidence so the model can never assert
-      // "high confidence" purely on events without supporting captures.
       const eventBoost = Math.min(0.2, 0.05 * Math.log1p(totalEvents))
-      confidence = Math.round(Math.min(1, confidence + eventBoost) * 1000) / 1000
+      confidence = clamp01(confidence + eventBoost)
       integrationEvidence = {
         verified_via_zapier: true,
         total_events: totalEvents,
@@ -359,7 +594,8 @@ async function detectForEmployee(
     const { title, description } = describePattern(
       b.capabilityId,
       b.keyParams,
-      capabilitiesById
+      capabilitiesById,
+      evaluation.track
     )
 
     out.push({
@@ -377,20 +613,71 @@ async function detectForEmployee(
         capability_id: b.capabilityId,
         key_params: b.keyParams,
         params_example: b.fullParamsExample,
-        representative_capture_ids: b.representativeCaptureIds,
+        representative_capture_ids: b.observations.slice(0, 5).map((o) => o.capture_id),
+        ...(evaluation.cadence
+          ? {
+              cadence: evaluation.cadence,
+              cadence_avg_days: Math.round(evaluation.cadenceAvgDays * 10) / 10,
+            }
+          : {}),
         ...(integrationEvidence ? { integration_evidence: integrationEvidence } : {}),
       },
-      occurrence_count: b.occurrenceCount,
-      estimated_weekly_minutes: Math.round(observedMinutes),
+      occurrence_count: occurrenceCount,
+      estimated_weekly_minutes: estimatedWeeklyMinutes,
       estimated_annual_cost: annualCost,
       estimated_annual_savings: annualSavings,
       confidence,
       automation_class: automationClassFor(taxonomyEntry),
-      last_seen_at: b.lastSeenAt,
+      detection_track: evaluation.track,
+      estimated_cadence: evaluation.cadence,
+      cross_employee_count: 1, // updated in the cross-employee pass below
+      last_seen_at: lastSeenAt,
     })
+    void observedMinutesInWindow // retained for clarity / debugging
   }
 
   return out
+}
+
+/**
+ * After per-employee detection, count distinct employees per
+ * (capability_id, key_params) signature within each business. Patterns
+ * that multiple people perform get a confidence boost and a higher
+ * cross_employee_count for the dashboard's "Done by N people" chip.
+ *
+ * Mutates the input array in place.
+ */
+function applyCrossEmployeeWeighting(opps: DetectedOpportunity[]): void {
+  // (business_id, capability+params) → set of employee_ids
+  const employeesByKey = new Map<string, Set<string>>()
+  for (const o of opps) {
+    const ce = crossEmployeeKey(
+      ((o.capability_pattern as { capability_id?: string }).capability_id) ?? '',
+      ((o.capability_pattern as { key_params?: Record<string, string> }).key_params) ?? {}
+    )
+    const fullKey = `${o.business_id}::${ce}`
+    if (!employeesByKey.has(fullKey)) employeesByKey.set(fullKey, new Set())
+    employeesByKey.get(fullKey)!.add(o.employee_id)
+  }
+
+  for (const o of opps) {
+    const ce = crossEmployeeKey(
+      ((o.capability_pattern as { capability_id?: string }).capability_id) ?? '',
+      ((o.capability_pattern as { key_params?: Record<string, string> }).key_params) ?? {}
+    )
+    const fullKey = `${o.business_id}::${ce}`
+    const count = employeesByKey.get(fullKey)?.size ?? 1
+    o.cross_employee_count = count
+    if (count > 1) {
+      // Cap the boost so cross-employee evidence corroborates but
+      // doesn't single-handedly carry a weak per-employee signal.
+      const boost = Math.min(
+        CROSS_EMPLOYEE_BOOST_CAP,
+        CROSS_EMPLOYEE_BOOST_PER * (count - 1)
+      )
+      o.confidence = clamp01(o.confidence + boost)
+    }
+  }
 }
 
 async function upsertOpportunities(
@@ -398,22 +685,59 @@ async function upsertOpportunities(
   opps: DetectedOpportunity[]
 ): Promise<number> {
   if (opps.length === 0) return 0
-  // Status defaults to 'new' for fresh inserts; we don't overwrite an
-  // existing reviewed/approved/etc. status on re-detection.
-  const { error } = await supabase
-    .from('opportunities')
-    .upsert(
-      opps.map((o) => ({
-        ...o,
-        // capability_pattern is jsonb — pg-js handles serialization
-      })),
-      {
-        onConflict: 'business_id,employee_id,pattern_signature',
-        ignoreDuplicates: false,
-      }
-    )
+  const { error } = await supabase.from('opportunities').upsert(opps, {
+    onConflict: 'business_id,employee_id,pattern_signature',
+    ignoreDuplicates: false,
+  })
   if (error) throw new Error(`opportunities upsert failed: ${error.message}`)
   return opps.length
+}
+
+/**
+ * Rescore pass: delete any existing opportunity row that no longer
+ * qualifies under the current rules. Preserves status on rows that
+ * survive (we don't touch them — UPSERT during the regular detection
+ * run will refresh their metadata).
+ *
+ * Strategy: collect the set of pattern_signatures that the current
+ * detection run produced (i.e., qualifying patterns). Then DELETE
+ * opportunities in scope whose signature isn't in that set AND that
+ * are older than the detection window (so we don't accidentally delete
+ * rows that simply haven't been observed yet in the window).
+ *
+ * Returns the count of rows deleted.
+ */
+async function rescoreCleanup(
+  supabase: ReturnType<typeof serverSupabase>,
+  scope: { businessIds: string[]; employeeIds?: string[] },
+  freshSignatures: Set<string>
+): Promise<number> {
+  if (scope.businessIds.length === 0) return 0
+  let query = supabase
+    .from('opportunities')
+    .select('id, pattern_signature, business_id, employee_id')
+    .in('business_id', scope.businessIds)
+  if (scope.employeeIds && scope.employeeIds.length > 0) {
+    query = query.in('employee_id', scope.employeeIds)
+  }
+  const { data: existing, error } = await query
+  if (error) {
+    console.error('rescore cleanup: read failed', error)
+    return 0
+  }
+  const toDelete = (existing ?? [])
+    .filter((row) => !freshSignatures.has(row.pattern_signature))
+    .map((row) => row.id)
+  if (toDelete.length === 0) return 0
+  const { error: delErr } = await supabase
+    .from('opportunities')
+    .delete()
+    .in('id', toDelete)
+  if (delErr) {
+    console.error('rescore cleanup: delete failed', delErr)
+    return 0
+  }
+  return toDelete.length
 }
 
 // ----- HTTP handlers -------------------------------------------------------
@@ -427,14 +751,14 @@ async function handle(req: NextRequest) {
     const supabase = serverSupabase()
     const url = new URL(req.url)
     const scopedEmployeeId = url.searchParams.get('employee_id')
+    const isRescore =
+      url.searchParams.get('rescore') === 'true' ||
+      url.searchParams.get('cleanup') === 'true'
 
-    // Pull the canonical capability registry once — every employee's
-    // detection uses the same taxonomy. Cached in-memory for 5 min by
-    // lib/capabilities-server, so repeat runs across the same cron tick
-    // hit the cache.
     const capabilitiesById = await getCapabilitiesById()
-
-    const windowStart = new Date(Date.now() - WINDOW_DAYS * 24 * 60 * 60 * 1000).toISOString()
+    const windowStart = new Date(
+      Date.now() - WINDOW_DAYS * 24 * 60 * 60 * 1000
+    ).toISOString()
 
     let query = supabase
       .from('employees')
@@ -448,18 +772,8 @@ async function handle(req: NextRequest) {
       return NextResponse.json({ processed_employees: 0, detected: 0 })
     }
 
-    let totalDetected = 0
-    let totalEmployeesProcessed = 0
-    const errors: string[] = []
-
-    // Cache rate overrides + event summaries per business so we don't
-    // re-fetch for every employee in the same business.
     const ratesByBusiness = new Map<string, Record<string, number>>()
-    const eventsByBusiness = new Map<
-      string,
-      Map<string, IntegrationEventSummary>
-    >()
-
+    const eventsByBusiness = new Map<string, Map<string, IntegrationEventSummary>>()
     async function getOverrides(bizId: string) {
       const cached = ratesByBusiness.get(bizId)
       if (cached) return cached
@@ -475,6 +789,9 @@ async function handle(req: NextRequest) {
       return fetched
     }
 
+    // ----- Per-employee detection -----
+    const allDetected: DetectedOpportunity[] = []
+    const errors: string[] = []
     for (const emp of employees as EmployeeRow[]) {
       try {
         const overrides = await getOverrides(emp.business_id)
@@ -487,19 +804,44 @@ async function handle(req: NextRequest) {
           events,
           capabilitiesById
         )
-        const upserted = await upsertOpportunities(supabase, detected)
-        totalDetected += upserted
-        totalEmployeesProcessed += 1
+        allDetected.push(...detected)
       } catch (err) {
         const message = err instanceof Error ? err.message : 'unknown error'
         errors.push(`employee=${emp.id}: ${message}`)
       }
     }
 
+    // ----- Cross-employee weighting -----
+    applyCrossEmployeeWeighting(allDetected)
+
+    // ----- Persist -----
+    const upserted = await upsertOpportunities(supabase, allDetected)
+
+    // ----- Rescore cleanup (when requested) -----
+    let deleted = 0
+    if (isRescore) {
+      const businessIds = Array.from(
+        new Set((employees as EmployeeRow[]).map((e) => e.business_id))
+      )
+      const employeeIds = scopedEmployeeId ? [scopedEmployeeId] : undefined
+      const freshSignatures = new Set(allDetected.map((o) => o.pattern_signature))
+      deleted = await rescoreCleanup(
+        supabase,
+        { businessIds, employeeIds },
+        freshSignatures
+      )
+    }
+
     return NextResponse.json({
-      processed_employees: totalEmployeesProcessed,
-      detected: totalDetected,
+      processed_employees: employees.length,
+      detected: upserted,
+      deleted_by_rescore: isRescore ? deleted : undefined,
       window_days: WINDOW_DAYS,
+      tracks: {
+        high_frequency: allDetected.filter((o) => o.detection_track === 'high_frequency').length,
+        recurring: allDetected.filter((o) => o.detection_track === 'recurring').length,
+      },
+      multi_employee_patterns: allDetected.filter((o) => o.cross_employee_count > 1).length,
       errors: errors.length ? errors : undefined,
     })
   } catch (err) {

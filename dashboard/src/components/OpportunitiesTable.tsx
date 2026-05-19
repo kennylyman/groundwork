@@ -11,6 +11,8 @@ import {
   ChevronRight,
   Sparkles,
   CheckCircle2,
+  Repeat,
+  Users,
 } from 'lucide-react'
 import { supabase, Employee } from '@/lib/supabase'
 
@@ -22,7 +24,11 @@ type CapabilityPattern = {
     total_events?: number
     tools?: Array<{ tool: string; event_count: number }>
   }
+  cadence?: 'weekly' | 'biweekly' | 'monthly'
+  cadence_avg_days?: number
 }
+
+type DetectionTrack = 'high_frequency' | 'recurring'
 
 type OpportunityRow = {
   id: string
@@ -40,9 +46,19 @@ type OpportunityRow = {
   capability_pattern: CapabilityPattern | null
   first_detected_at: string
   last_seen_at: string
+  detection_track: DetectionTrack | null
+  estimated_cadence: 'weekly' | 'biweekly' | 'monthly' | null
+  cross_employee_count: number | null
+}
+
+const CADENCE_LABEL: Record<'weekly' | 'biweekly' | 'monthly', string> = {
+  weekly: 'Appears weekly',
+  biweekly: 'Appears biweekly',
+  monthly: 'Appears monthly',
 }
 
 type SortKey = 'savings' | 'occurrence' | 'confidence' | 'recent'
+type TrackFilter = 'all' | 'high_frequency' | 'recurring'
 
 const STATUS_TONE: Record<string, string> = {
   new: 'bg-amber-50 text-amber-700 border-amber-100',
@@ -73,6 +89,7 @@ export function OpportunitiesTable() {
   const [loading, setLoading] = useState(true)
   const [sortKey, setSortKey] = useState<SortKey>('savings')
   const [statusFilter, setStatusFilter] = useState<string>('all')
+  const [trackFilter, setTrackFilter] = useState<TrackFilter>('all')
 
   useEffect(() => {
     void loadAll()
@@ -94,11 +111,21 @@ export function OpportunitiesTable() {
     setLoading(false)
   }
 
+  const recurringCount = useMemo(
+    () => opportunities.filter((o) => o.detection_track === 'recurring').length,
+    [opportunities]
+  )
+
   const sorted = useMemo(() => {
-    const filtered =
-      statusFilter === 'all'
-        ? opportunities
-        : opportunities.filter((o) => o.status === statusFilter)
+    const filtered = opportunities
+      .filter((o) => statusFilter === 'all' || o.status === statusFilter)
+      .filter((o) => {
+        if (trackFilter === 'all') return true
+        // Legacy rows pre-0023 default to 'high_frequency' via the DB
+        // default, so a null detection_track still groups as high_freq.
+        const track = o.detection_track ?? 'high_frequency'
+        return track === trackFilter
+      })
     const arr = [...filtered]
     arr.sort((a, b) => {
       switch (sortKey) {
@@ -157,7 +184,25 @@ export function OpportunitiesTable() {
           </div>
         </div>
 
-        <div className="flex items-center gap-2">
+        <div className="flex items-center gap-2 flex-wrap">
+          {/* Track filter — lets owners look only at high-frequency
+              automations vs only at recurring business processes. */}
+          <div className="flex items-center gap-1.5 text-xs">
+            <Repeat className="w-3.5 h-3.5 text-gray-400" />
+            <select
+              value={trackFilter}
+              onChange={(e) => setTrackFilter(e.target.value as TrackFilter)}
+              className="bg-gray-50 border border-gray-200 rounded-lg px-2 py-1 text-xs font-medium text-gray-700 focus:outline-none focus:border-gray-400"
+              title="Filter by detection track"
+            >
+              <option value="all">All patterns</option>
+              <option value="high_frequency">High frequency</option>
+              <option value="recurring">
+                Recurring workflows{recurringCount > 0 ? ` (${recurringCount})` : ''}
+              </option>
+            </select>
+          </div>
+
           {/* Status filter */}
           <div className="flex items-center gap-1.5 text-xs">
             <Filter className="w-3.5 h-3.5 text-gray-400" />
@@ -197,7 +242,10 @@ export function OpportunitiesTable() {
           <div className="w-6 h-6 border-2 border-gray-300 border-t-gray-900 rounded-full animate-spin mx-auto" />
         </div>
       ) : sorted.length === 0 ? (
-        <EmptyState filtered={statusFilter !== 'all'} />
+        <EmptyState
+          filtered={statusFilter !== 'all' || trackFilter !== 'all'}
+          trackFilter={trackFilter}
+        />
       ) : (
         <div className="divide-y divide-gray-50">
           {sorted.map((opp) => (
@@ -228,6 +276,9 @@ function OpportunityRowView({
   const verifiedViaZapier =
     !!opp.capability_pattern?.integration_evidence?.verified_via_zapier
   const eventCount = opp.capability_pattern?.integration_evidence?.total_events ?? 0
+  const isRecurring = opp.detection_track === 'recurring'
+  const cadence = opp.estimated_cadence ?? opp.capability_pattern?.cadence ?? null
+  const crossEmployee = opp.cross_employee_count ?? 1
 
   return (
     <Link
@@ -236,13 +287,31 @@ function OpportunityRowView({
     >
       {/* Title + meta */}
       <div className="flex-1 min-w-0">
-        <div className="flex items-center gap-2 mb-1">
+        <div className="flex items-center gap-2 mb-1 flex-wrap">
           <p className="text-sm font-medium text-gray-900 truncate">{opp.title}</p>
           <span
             className={`shrink-0 text-[10px] uppercase tracking-wider font-semibold px-1.5 py-0.5 rounded border ${statusTone}`}
           >
             {opp.status}
           </span>
+          {isRecurring && (
+            <span
+              title="Recurring workflow — a periodic business process detected across multiple cycles"
+              className="shrink-0 inline-flex items-center gap-0.5 text-[10px] uppercase tracking-wider font-semibold px-1.5 py-0.5 rounded border bg-indigo-50 text-indigo-700 border-indigo-200"
+            >
+              <Repeat className="w-2.5 h-2.5" />
+              Recurring
+            </span>
+          )}
+          {crossEmployee > 1 && (
+            <span
+              title={`This pattern was detected for ${crossEmployee} employees in this business — much stronger signal than a single-person habit`}
+              className="shrink-0 inline-flex items-center gap-0.5 text-[10px] uppercase tracking-wider font-semibold px-1.5 py-0.5 rounded border bg-purple-50 text-purple-700 border-purple-200"
+            >
+              <Users className="w-2.5 h-2.5" />
+              {crossEmployee} people
+            </span>
+          )}
           {verifiedViaZapier && (
             <span
               title={`Confirmed by ${eventCount} Zapier event${eventCount === 1 ? '' : 's'}`}
@@ -253,16 +322,20 @@ function OpportunityRowView({
             </span>
           )}
         </div>
-        <div className="flex items-center gap-3 text-xs text-gray-500">
+        <div className="flex items-center gap-3 text-xs text-gray-500 flex-wrap">
           {employee && (
             <>
               <span className="text-gray-700 font-medium">{employee.name}</span>
               <span className="text-gray-300">·</span>
             </>
           )}
-          <span>{opp.occurrence_count}× in 7d</span>
+          {isRecurring && cadence ? (
+            <span className="text-indigo-700 font-medium">{CADENCE_LABEL[cadence]}</span>
+          ) : (
+            <span>{opp.occurrence_count}× observed</span>
+          )}
           <span className="text-gray-300">·</span>
-          <span>{opp.estimated_weekly_minutes} min/wk</span>
+          <span>{opp.estimated_weekly_minutes} min/wk avg</span>
           {automation && (
             <>
               <span className="text-gray-300">·</span>
@@ -293,7 +366,46 @@ function OpportunityRowView({
   )
 }
 
-function EmptyState({ filtered }: { filtered: boolean }) {
+function EmptyState({
+  filtered,
+  trackFilter,
+}: {
+  filtered: boolean
+  trackFilter: TrackFilter
+}) {
+  // Dedicated Track-2 empty state spelling out the "you'll see these
+  // after the first cycle" expectation. Owners new to the dashboard
+  // shouldn't wonder why "recurring" is empty when they've only had
+  // the agent installed for 3 hours.
+  if (trackFilter === 'recurring') {
+    return (
+      <div className="px-6 py-12 text-center">
+        <div className="relative inline-block mb-4">
+          <div className="w-14 h-14 rounded-2xl bg-gradient-to-br from-indigo-50 via-violet-50 to-purple-50 flex items-center justify-center">
+            <Repeat className="w-6 h-6 text-indigo-500" />
+          </div>
+        </div>
+        <p className="text-sm font-medium text-gray-900 mb-1">
+          No recurring workflows detected yet
+        </p>
+        <p className="text-xs text-gray-500 max-w-sm mx-auto leading-relaxed">
+          Recurring workflow opportunities appear after patterns are observed
+          across multiple cycles. Check back after your first billing or
+          payroll run.
+        </p>
+      </div>
+    )
+  }
+  if (trackFilter === 'high_frequency') {
+    return (
+      <div className="px-6 py-10 text-center">
+        <p className="text-sm text-gray-500">
+          No high-frequency patterns yet. They show up after the agent has
+          captured a few days of repeated daily tasks.
+        </p>
+      </div>
+    )
+  }
   if (filtered) {
     return (
       <div className="px-6 py-10 text-center">
@@ -312,9 +424,10 @@ function EmptyState({ filtered }: { filtered: boolean }) {
         </div>
       </div>
       <p className="text-sm font-medium text-gray-900 mb-1">No opportunities yet</p>
-      <p className="text-xs text-gray-500 max-w-xs mx-auto leading-relaxed">
-        Once the agent has captured a few days of work with the new capability
-        tagging, repeating patterns will surface here automatically.
+      <p className="text-xs text-gray-500 max-w-sm mx-auto leading-relaxed">
+        Detection runs daily and surfaces two kinds of patterns: high-frequency
+        repetition (daily / multiple times per week) and recurring business
+        processes (billing, payroll, reporting on a weekly–monthly cadence).
       </p>
     </div>
   )
