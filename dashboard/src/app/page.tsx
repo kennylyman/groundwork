@@ -7,6 +7,7 @@ import { useRouter } from 'next/navigation'
 import Link from 'next/link'
 import { PauseToggle, PausedBadge } from '@/components/PauseToggle'
 import { OpportunitiesTable } from '@/components/OpportunitiesTable'
+import { WorkflowSequencesPanel } from '@/components/WorkflowSequencesPanel'
 import { ConnectionPrompts } from '@/components/ConnectionPrompts'
 import { WorkflowIntelligenceMap } from '@/components/WorkflowIntelligenceMap'
 import { SignOutButton } from '@/components/SignOutButton'
@@ -374,6 +375,15 @@ export default function Dashboard() {
         {/* Opportunities — surface highest-leverage detected patterns first */}
         <div className="mb-8">
           <OpportunitiesTable />
+        </div>
+
+        {/* Workflow sequences — multi-step chains rolled up from individual
+            captures. Sits between the per-pattern opportunities and the
+            per-employee status table because it bridges the two views:
+            "here's what the team does together" before "here's who's
+            doing what right now." */}
+        <div className="mb-8">
+          <WorkflowSequencesPanel />
         </div>
 
         {/* Employee Table */}

@@ -39,6 +39,12 @@ import {
   type Capability,
 } from '@/lib/capabilities-server'
 import { loadRateOverrides, resolveRate } from '@/lib/rates'
+import {
+  detectSequencesForEmployee,
+  scoreSequenceConfidence,
+  type CaptureRowForDetection,
+  type DetectedSequenceOccurrence,
+} from '@/lib/sequence-detection'
 
 export const maxDuration = 60
 
@@ -832,6 +838,16 @@ async function handle(req: NextRequest) {
       )
     }
 
+    // ----- Workflow sequence detection -----
+    // Run after opportunity scoring completes per spec. Pulls the same
+    // capture set we already have access to, but with a wider lens —
+    // sequences group captures into multi-step chains rather than
+    // counting capability tags.
+    const sequenceResult = await runSequenceDetection(
+      supabase,
+      employees as EmployeeRow[]
+    )
+
     return NextResponse.json({
       processed_employees: employees.length,
       detected: upserted,
@@ -842,6 +858,7 @@ async function handle(req: NextRequest) {
         recurring: allDetected.filter((o) => o.detection_track === 'recurring').length,
       },
       multi_employee_patterns: allDetected.filter((o) => o.cross_employee_count > 1).length,
+      sequences: sequenceResult,
       errors: errors.length ? errors : undefined,
     })
   } catch (err) {
@@ -849,6 +866,290 @@ async function handle(req: NextRequest) {
     console.error('detect-opportunities: unhandled', err)
     return NextResponse.json({ error: message }, { status: 500 })
   }
+}
+
+// ===========================================================================
+// Workflow sequence detection
+// ===========================================================================
+
+const SEQUENCE_WINDOW_DAYS = 30
+
+type SequenceDetectionResult = {
+  detected_occurrences: number
+  unique_sequences: number
+  upserted: number
+  errors?: string[]
+}
+
+/**
+ * Per-employee sequence detection, then cross-employee aggregation. For
+ * each business in scope:
+ *   1. Pull captures (tool/category/task) for the SEQUENCE_WINDOW_DAYS.
+ *   2. Run detectSequencesForEmployee() per employee.
+ *   3. Group all occurrences by sequence_hash within the business.
+ *   4. For each unique sequence_hash, upsert workflow_sequences and
+ *      insert workflow_sequence_steps rows for each occurrence. The
+ *      (sequence_id, capture_id) unique constraint dedupes re-detection.
+ *   5. Recompute confidence_score from cross-employee stats and the
+ *      latest occurrence set.
+ *
+ * Returns aggregate counts. Errors are collected and reported but never
+ * thrown — the opportunity detection result above is the primary
+ * cron output and shouldn't be hidden by a sequence-pass failure.
+ */
+async function runSequenceDetection(
+  supabase: ReturnType<typeof serverSupabase>,
+  employees: EmployeeRow[]
+): Promise<SequenceDetectionResult> {
+  const result: SequenceDetectionResult = {
+    detected_occurrences: 0,
+    unique_sequences: 0,
+    upserted: 0,
+    errors: [],
+  }
+  if (employees.length === 0) return result
+
+  const windowStart = new Date(
+    Date.now() - SEQUENCE_WINDOW_DAYS * 24 * 60 * 60 * 1000
+  ).toISOString()
+
+  // Group employees by business so we run the cross-employee aggregation
+  // pass within each tenant.
+  const byBusiness = new Map<string, EmployeeRow[]>()
+  for (const emp of employees) {
+    const list = byBusiness.get(emp.business_id) ?? []
+    list.push(emp)
+    byBusiness.set(emp.business_id, list)
+  }
+
+  for (const [businessId, emps] of byBusiness) {
+    try {
+      // Pull captures for ALL employees in this business in one go.
+      // Smaller column projection (no capabilities jsonb) keeps payload
+      // light even over 30 days.
+      const empIds = emps.map((e) => e.id)
+      const { data: rawCaptures, error: capErr } = await supabase
+        .from('captures')
+        .select('id, business_id, employee_id, captured_at, task, category, software, confidence')
+        .in('employee_id', empIds)
+        .gte('captured_at', windowStart)
+        .order('captured_at', { ascending: true })
+
+      if (capErr) {
+        result.errors!.push(`business=${businessId}: captures fetch failed: ${capErr.message}`)
+        continue
+      }
+      const captures = (rawCaptures ?? []) as CaptureRowForDetection[]
+      if (captures.length === 0) continue
+
+      // Partition by employee for per-employee session-grouping.
+      const byEmployee = new Map<string, CaptureRowForDetection[]>()
+      for (const c of captures) {
+        const arr = byEmployee.get(c.employee_id) ?? []
+        arr.push(c)
+        byEmployee.set(c.employee_id, arr)
+      }
+
+      // Detect occurrences per employee.
+      const occurrencesByHash = new Map<string, DetectedSequenceOccurrence[]>()
+      const employeesByHash = new Map<string, Set<string>>()
+      for (const [employeeId, caps] of byEmployee) {
+        const occurrences = detectSequencesForEmployee(caps)
+        for (const occ of occurrences) {
+          const arr = occurrencesByHash.get(occ.sequenceHash) ?? []
+          arr.push(occ)
+          occurrencesByHash.set(occ.sequenceHash, arr)
+
+          const empSet = employeesByHash.get(occ.sequenceHash) ?? new Set<string>()
+          empSet.add(employeeId)
+          employeesByHash.set(occ.sequenceHash, empSet)
+        }
+      }
+      result.detected_occurrences += [...occurrencesByHash.values()].reduce(
+        (s, arr) => s + arr.length,
+        0
+      )
+      result.unique_sequences += occurrencesByHash.size
+
+      // Upsert each unique sequence + insert its step rows.
+      for (const [sequenceHash, occurrences] of occurrencesByHash) {
+        const upsertOk = await upsertSequence(
+          supabase,
+          businessId,
+          sequenceHash,
+          occurrences,
+          employeesByHash.get(sequenceHash) ?? new Set()
+        )
+        if (upsertOk) result.upserted += 1
+      }
+    } catch (err) {
+      const message = err instanceof Error ? err.message : 'unknown error'
+      result.errors!.push(`business=${businessId}: ${message}`)
+    }
+  }
+
+  if (result.errors && result.errors.length === 0) delete result.errors
+  return result
+}
+
+/**
+ * Upsert workflow_sequences for one (business, sequence_hash), then
+ * append step rows for each occurrence. Returns true on success.
+ */
+async function upsertSequence(
+  supabase: ReturnType<typeof serverSupabase>,
+  businessId: string,
+  sequenceHash: string,
+  occurrences: DetectedSequenceOccurrence[],
+  employeeSet: Set<string>
+): Promise<boolean> {
+  if (occurrences.length === 0) return false
+
+  // All occurrences share the same chain shape (same hash), so the
+  // first one is representative for tools/categories/step_count.
+  const first = occurrences[0]
+  const stepCount = first.steps.length
+  const tools = first.tools
+  const categories = first.categories
+
+  // Find an existing row to merge with — gives us accumulated
+  // occurrence_count from prior runs.
+  const { data: existing, error: existingErr } = await supabase
+    .from('workflow_sequences')
+    .select('id, occurrence_count, started_at, employee_id')
+    .eq('business_id', businessId)
+    .eq('sequence_hash', sequenceHash)
+    .maybeSingle()
+  if (existingErr) {
+    console.error('upsertSequence: existing read failed', existingErr)
+    return false
+  }
+
+  // Aggregate stats across the NEW occurrences this run.
+  const occurrenceStartTimes = occurrences.map((o) => o.steps[0].captured_at)
+  const allStepConfidences = occurrences.flatMap((o) =>
+    o.steps.map((s) => s.confidence ?? 0)
+  )
+  const avgStepConfidence =
+    allStepConfidences.length > 0
+      ? allStepConfidences.reduce((a, b) => a + b, 0) / allStepConfidences.length
+      : 0
+  const durations = occurrences.map((o) => o.durationSeconds)
+  const avgDuration =
+    durations.length > 0
+      ? Math.round(durations.reduce((a, b) => a + b, 0) / durations.length)
+      : 0
+
+  const newOccurrenceCount =
+    (existing?.occurrence_count ?? 0) + occurrences.length
+  const earliestStart = occurrenceStartTimes.reduce(
+    (a, b) => (a < b ? a : b),
+    occurrenceStartTimes[0]
+  )
+  const latestEnd = occurrences
+    .map((o) => o.steps[o.steps.length - 1].captured_at)
+    .reduce((a, b) => (a > b ? a : b))
+  const startedAt = existing?.started_at
+    ? existing.started_at < earliestStart
+      ? existing.started_at
+      : earliestStart
+    : earliestStart
+
+  const confidence = scoreSequenceConfidence({
+    occurrenceCount: newOccurrenceCount,
+    employeeCount: employeeSet.size,
+    avgStepConfidence,
+    occurrenceStartTimes,
+  })
+
+  // Upsert the row. employee_id stays as the FIRST observer for
+  // existing rows; for new rows we use the first occurrence's employee.
+  const employeeIdForRow =
+    existing?.employee_id ?? occurrences[0].steps[0].employee_id
+
+  let sequenceId = existing?.id
+  if (existing) {
+    const { error: updErr } = await supabase
+      .from('workflow_sequences')
+      .update({
+        occurrence_count: newOccurrenceCount,
+        last_seen_at: latestEnd,
+        ended_at: latestEnd,
+        started_at: startedAt,
+        confidence_score: confidence,
+        avg_duration_seconds: avgDuration,
+        // Tools/categories should be stable for a given hash, but we
+        // overwrite from the latest occurrence in case someone updated
+        // the normalization rules and the row's cached arrays are now
+        // stale. The hash itself is what disambiguates patterns.
+        tools,
+        task_categories: categories,
+        updated_at: new Date().toISOString(),
+      })
+      .eq('id', existing.id)
+    if (updErr) {
+      console.error('upsertSequence: update failed', updErr)
+      return false
+    }
+  } else {
+    const { data: inserted, error: insErr } = await supabase
+      .from('workflow_sequences')
+      .insert({
+        business_id: businessId,
+        employee_id: employeeIdForRow,
+        sequence_hash: sequenceHash,
+        started_at: startedAt,
+        ended_at: latestEnd,
+        last_seen_at: latestEnd,
+        step_count: stepCount,
+        tools,
+        task_categories: categories,
+        occurrence_count: occurrences.length,
+        confidence_score: confidence,
+        avg_duration_seconds: avgDuration,
+      })
+      .select('id')
+      .single()
+    if (insErr || !inserted) {
+      console.error('upsertSequence: insert failed', insErr)
+      return false
+    }
+    sequenceId = inserted.id
+  }
+
+  // Append step rows for each occurrence. The (sequence_id, capture_id)
+  // unique constraint dedupes any captures that were already recorded
+  // as steps of this sequence on a prior run.
+  const stepRows: Array<Record<string, unknown>> = []
+  for (const occ of occurrences) {
+    occ.steps.forEach((step, idx) => {
+      stepRows.push({
+        sequence_id: sequenceId,
+        capture_id: step.id,
+        step_index: idx,
+        tool: step.software,
+        category: step.category,
+        task: step.task,
+        captured_at: step.captured_at,
+      })
+    })
+  }
+  if (stepRows.length > 0) {
+    // upsert with onConflict=ignore so repeat detections of the same
+    // (sequence, capture) silently skip rather than error.
+    const { error: stepErr } = await supabase
+      .from('workflow_sequence_steps')
+      .upsert(stepRows, {
+        onConflict: 'sequence_id,capture_id',
+        ignoreDuplicates: true,
+      })
+    if (stepErr) {
+      console.error('upsertSequence: steps insert failed', stepErr)
+      // Non-fatal — the parent row is still useful.
+    }
+  }
+
+  return true
 }
 
 export const GET = handle
