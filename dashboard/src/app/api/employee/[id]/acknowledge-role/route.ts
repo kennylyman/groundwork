@@ -59,10 +59,19 @@ export async function POST(request: NextRequest, ctx: RouteContext) {
       return NextResponse.json({ error: 'No role profile for this employee' }, { status: 404 })
     }
 
+    // Translate the HTTP action shape ("accept" / "dismiss") into the
+    // DB enum stored on employee_role_profiles.acknowledgment_action,
+    // which the CHECK constraint pins to ("accepted" / "dismissed").
+    // Previously this was an `as 'accepted' | 'dismissed'` TYPE assertion
+    // — a TS compile-time lie that did nothing at runtime — so the raw
+    // request value ("accept") got written and tripped the CHECK.
+    const acknowledgmentAction: 'accepted' | 'dismissed' =
+      action === 'accept' ? 'accepted' : 'dismissed'
+
     const now = new Date().toISOString()
     const updates = {
       acknowledged_at: now,
-      acknowledgment_action: action as 'accepted' | 'dismissed',
+      acknowledgment_action: acknowledgmentAction,
     }
 
     const { error: ackErr } = await supabase
