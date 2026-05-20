@@ -87,6 +87,12 @@ export async function POST(request: NextRequest) {
       ``,
       `This link is unique to you and expires once used. Questions? Just reply to this email.`,
       ``,
+      `--- Having trouble installing? ---`,
+      `Some antivirus software (Norton, Bitdefender, Windows Defender) may flag Groundwork during installation. If you see a security warning:`,
+      `  - Click "More info" then "Run anyway" on Windows SmartScreen`,
+      `  - Or temporarily disable real-time protection during install, then re-enable it`,
+      `If Groundwork was quarantined, restore it from your AV quarantine folder.`,
+      ``,
       `—`,
       `Groundwork · gwork.tech`,
       `Data disclosure: ${termsUrl}`,
@@ -133,7 +139,28 @@ export async function POST(request: NextRequest) {
                   Questions? Just reply to this email.
                 </p>
               </div>
-              <p style="text-align: center; font-size: 12px; color: #9ca3af; margin-top: 24px;">
+              <!-- AV troubleshooting footer — light tone so it doesn't
+                   alarm employees who don't need it, but visible for
+                   anyone who hits a Norton / Bitdefender / Windows
+                   Defender block on first launch. Resend strips
+                   <details> in some clients; using a styled box that
+                   reads as informational rather than a warning. -->
+              <div style="margin-top: 16px; padding: 14px 16px; background: #f9fafb; border: 1px solid #e5e7eb; border-radius: 10px;">
+                <p style="margin: 0 0 6px; font-size: 11px; color: #6b7280; font-weight: 600; letter-spacing: 0.04em; text-transform: uppercase;">
+                  Having trouble installing?
+                </p>
+                <p style="margin: 0 0 6px; font-size: 12px; color: #6b7280; line-height: 1.55;">
+                  Some antivirus software (Norton, Bitdefender, Windows Defender) may flag Groundwork during installation. If you see a security warning:
+                </p>
+                <ul style="margin: 0 0 6px 18px; padding: 0; font-size: 12px; color: #6b7280; line-height: 1.55;">
+                  <li>Click <strong>More info</strong> &rarr; <strong>Run anyway</strong> on Windows SmartScreen</li>
+                  <li>Or temporarily disable real-time protection during install, then re-enable it</li>
+                </ul>
+                <p style="margin: 0; font-size: 12px; color: #6b7280; line-height: 1.55;">
+                  If Groundwork was quarantined, restore it from your AV quarantine folder. Questions? Just reply to this email.
+                </p>
+              </div>
+              <p style="text-align: center; font-size: 12px; color: #9ca3af; margin-top: 20px;">
                 Groundwork &middot; gwork.tech &middot; <a href="${termsUrl}" style="color: #9ca3af; text-decoration: underline;">Data disclosure</a>
               </p>
             </div>

@@ -21,8 +21,34 @@ except Exception:
     # working in dev.
     VERSION = "0.0.0-dev"
 
+# Telemetry endpoint for crashes that happen before the first successful
+# /api/agent-version call. Closes the "token redeemed, agent_version null"
+# blind spot. Override for dev / staging.
+STARTUP_ERROR_URL = os.environ.get(
+    'GROUNDWORK_STARTUP_ERROR_URL',
+    'https://gwork.tech/api/agent/startup-error',
+)
+
+# Set inside _maybe_hard_update() once the agent has successfully reached
+# /api/agent-version at least once. The wrapping try/except in __main__
+# uses this to decide whether to POST a startup error or just log + die.
+# After the first heartbeat, any crash that escapes the capture-loop
+# safety net is a normal-mode failure, not a startup failure.
+_first_heartbeat_succeeded = False
+
+# Shadow of the loaded config so _report_startup_error() can attribute
+# crashes to a specific install_token when load_or_activate_config()
+# succeeded but a later step failed. None when activation itself hadn't
+# completed yet — those reports go anonymous.
+_last_known_config: dict | None = None
+
 CONFIG_DIR = Path(os.environ.get('APPDATA', '.')) / 'Groundwork'
-CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+# NOTE: do NOT call CONFIG_DIR.mkdir() at module level. If APPDATA is
+# read-only / redirected / on a non-existent network share, that mkdir
+# raises before logging is configured and the agent dies with zero
+# observable output. The mkdir now lives in _ensure_config_dir_writable()
+# which runs first thing in main() with a hard-coded fallback log path
+# and a Windows MessageBox on failure.
 LOG_FILE = CONFIG_DIR / 'groundwork.log'
 CONFIG_FILE = CONFIG_DIR / 'config.json'
 QUEUE_DB = CONFIG_DIR / 'queue.db'
@@ -739,6 +765,11 @@ def _maybe_hard_update(config: dict) -> None:
     )
     if not release:
         return
+    # First successful heartbeat — server has now seen this agent. Any
+    # later crash is a steady-state failure, not a startup failure, and
+    # the __main__ wrap will log/die without a startup-error POST.
+    global _first_heartbeat_succeeded
+    _first_heartbeat_succeeded = True
     action = decide_action(VERSION, release)
     log(
         f"update check: current={VERSION} "
@@ -752,6 +783,126 @@ def _maybe_hard_update(config: dict) -> None:
         # perform_update() exits on success. If it returned, the update
         # failed and we continue running on the current build. Logged
         # inside perform_update().
+
+
+def _report_startup_error(exc: BaseException, config: dict | None) -> None:
+    """Best-effort POST to /api/agent/startup-error so the server sees
+    pre-heartbeat crashes that would otherwise be invisible. Called from
+    the __main__ wrap when an exception escapes main() AND the first
+    heartbeat hasn't succeeded yet.
+
+    Token attribution: pulled from config if available. Pre-activation
+    crashes happen before config exists; in that case we POST without
+    a token and the row attributes to no employee (still useful — we
+    see the exception class + Windows version for triage). The server
+    route accepts both cases.
+
+    Network errors are swallowed. We're already dying; we'd rather
+    succeed at the dialog/log than crash the crash reporter."""
+    try:
+        import platform
+        import json
+        import urllib.request
+        from datetime import datetime, timezone
+
+        install_token = None
+        if isinstance(config, dict):
+            t = config.get("install_token")
+            if isinstance(t, str) and t.strip():
+                install_token = t.strip()
+
+        payload = {
+            "error_type": type(exc).__name__,
+            "error_message": str(exc)[:2000],
+            "windows_version": platform.platform(),
+            "agent_version": VERSION,
+            "timestamp": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        }
+        if install_token:
+            payload["install_token"] = install_token
+
+        # urllib instead of requests because requests might be exactly
+        # the thing that failed to import. urllib is stdlib.
+        req = urllib.request.Request(
+            STARTUP_ERROR_URL,
+            data=json.dumps(payload).encode("utf-8"),
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        # Short timeout — we're about to exit and don't want to hang
+        # on a network that's already failing.
+        urllib.request.urlopen(req, timeout=5).read()
+        try:
+            log(f"startup-error reported to server: {type(exc).__name__}")
+        except Exception:
+            pass
+    except Exception:
+        # Telemetry failures are non-fatal. Avoid logging an error about
+        # the error reporter failing during error reporting.
+        pass
+
+
+def _ensure_config_dir_writable() -> None:
+    """Pre-logging fatal-error gate. Tries to create %APPDATA%\\Groundwork.
+    If APPDATA is read-only, redirected to an unreachable network share,
+    or otherwise broken, the agent would otherwise die at module load
+    with zero log output (logging isn't configured yet) and no UI feedback.
+    This function:
+
+      1. try mkdir CONFIG_DIR.
+      2. On failure: write a fatal report to C:\\Users\\Public\\Groundwork-error.log
+         (the Public profile is world-writable on Windows by default — it
+         survives roaming-profile misconfigurations that break %APPDATA%).
+      3. Show a Windows MessageBox pointing the user at the fallback log.
+      4. Exit cleanly.
+
+    Bare-stdlib only (no logging, no requests) — this code runs BEFORE
+    configure_logging() and must not fail because something else failed."""
+    try:
+        CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+        # Probe writability — exists() doesn't catch read-only or filesystem
+        # quota failures. The mkdir above might "succeed" if the dir already
+        # exists at a read-only path.
+        probe = CONFIG_DIR / ".write-probe"
+        probe.write_text("ok", encoding="utf-8")
+        probe.unlink()
+        return
+    except Exception as e:
+        # Build a structured fatal report. Hard-coded path because we can't
+        # trust APPDATA — that's exactly the state we're failing in.
+        fallback_log = Path("C:/Users/Public/Groundwork-error.log")
+        try:
+            import platform
+            from datetime import datetime, timezone
+            now_iso = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+            win_ver = platform.platform()
+            report_lines = [
+                "=" * 60,
+                f"Groundwork fatal startup error (agent v{VERSION})",
+                f"timestamp:  {now_iso}",
+                f"windows:    {win_ver}",
+                f"appdata:    {os.environ.get('APPDATA', '<unset>')}",
+                f"config_dir: {CONFIG_DIR}",
+                f"exception:  {type(e).__name__}: {e}",
+                "",
+            ]
+            try:
+                with open(fallback_log, "a", encoding="utf-8") as f:
+                    f.write("\n".join(report_lines) + "\n")
+            except Exception:
+                # Even the fallback failed. Nothing more we can do but the
+                # MessageBox below.
+                pass
+        except Exception:
+            pass
+
+        _show_fatal_dialog(
+            "Groundwork could not create its data folder.\n\n"
+            "Please contact your administrator.\n\n"
+            f"Error written to {fallback_log}\n\n"
+            f"Detail: {type(e).__name__}: {e}"
+        )
+        sys.exit(1)
 
 
 def _show_fatal_dialog(message: str) -> None:
@@ -845,11 +996,15 @@ def main() -> None:
             log(f"uninstall error: {e}")
         sys.exit(0)
 
-    # Runtime-dir sanity check — runs FIRST so a broken extraction
-    # surfaces a clear Windows dialog instead of a silent crash deeper
-    # in the loop. If the bootloader extraction succeeded we're already
-    # running; this check catches mid-session corruption (AV / disk
-    # cleanup / ACL changes) on the persistent runtime dir.
+    # Pre-logging fatal-error gate. Runs FIRST so a broken APPDATA
+    # surfaces a Public-folder fallback log + MessageBox instead of a
+    # silent crash with no diagnostics. Must run before any code path
+    # that calls log() (because logging itself depends on CONFIG_DIR).
+    _ensure_config_dir_writable()
+
+    # Runtime-dir sanity check — runs after CONFIG_DIR is known good so
+    # a broken extraction surfaces a clear Windows dialog instead of a
+    # silent crash deeper in the loop.
     _verify_runtime_directory()
 
     log("=" * 60)
@@ -885,6 +1040,13 @@ def main() -> None:
         time.sleep(30)
         sys.exit(1)
 
+    # Stash config at module level so the __main__ crash-reporter can
+    # pull install_token from it. If we crash AFTER this point but
+    # BEFORE the first heartbeat, the startup-error POST will attribute
+    # to the right employee.
+    global _last_known_config
+    _last_known_config = config
+
     log(f"Employee: {config['employee_id']}")
     log(f"Business: {config['business_id']}")
     log(f"Supabase URL: {'set' if config.get('supabase_url') else 'MISSING'}")
@@ -911,9 +1073,23 @@ if __name__ == '__main__':
     try:
         main()
     except SystemExit:
+        # _ensure_config_dir_writable() and _verify_runtime_directory()
+        # use sys.exit(1) after showing their own dialog. Re-raise so the
+        # OS sees the exit code. Don't telemetry SystemExit — those have
+        # already surfaced user-visible diagnostics.
         raise
     except Exception as e:
         log(f"FATAL ERROR: {e}")
         log(traceback.format_exc())
+        # If we never reached the first heartbeat, the server has zero
+        # visibility into this crash. POST a structured report so the
+        # error class shows up in agent_startup_errors and we can spot
+        # patterns across the fleet (e.g. "Norton ImportError clustering
+        # on Windows-10-10.0.19045"). Best-effort; never raises.
+        if not _first_heartbeat_succeeded:
+            # _last_known_config is set inside main() after load_or_activate_config.
+            # When None, the reporter falls back to an anonymous POST (still
+            # captures error_type + Windows version, just no employee link).
+            _report_startup_error(e, _last_known_config)
         time.sleep(30)
         sys.exit(1)
