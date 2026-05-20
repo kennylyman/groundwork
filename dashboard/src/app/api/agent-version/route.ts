@@ -143,9 +143,23 @@ export async function GET(request: NextRequest) {
   // a heartbeat — we MUST hit the server every time so employees.agent_version
   // gets recorded. Without employee_id (a polling client like the settings
   // page), 60s edge cache is fine.
+  //
+  // Vary: when the response IS cacheable, partition the edge cache by
+  // X-Groundwork-Platform so a Mac probe and a Windows probe don't share
+  // a single cache entry. Without this, the first uncached request after
+  // a deploy wins for 60s — observed in the v0.5.9 promotion: a Mac probe
+  // returned the Windows download_url because a Windows probe had warmed
+  // the edge cache 30s earlier. Real agent calls always set employee_id
+  // (→ no-store) so they were never affected, but settings-page / manual
+  // probes saw the wrong response.
   const cacheControl = employeeId
     ? 'no-store'
     : 'public, max-age=60, s-maxage=60'
+
+  const headers: Record<string, string> = { 'Cache-Control': cacheControl }
+  if (!employeeId) {
+    headers['Vary'] = 'X-Groundwork-Platform'
+  }
 
   return NextResponse.json(
     {
@@ -155,10 +169,6 @@ export async function GET(request: NextRequest) {
       sha256: latest?.sha256 ?? null,
       release_notes: latest?.release_notes ?? null,
     },
-    {
-      headers: {
-        'Cache-Control': cacheControl,
-      },
-    }
+    { headers }
   )
 }
