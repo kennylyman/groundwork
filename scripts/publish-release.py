@@ -117,6 +117,10 @@ def main() -> int:
     # overwrite download_url, sha256, release_notes, is_latest. We
     # explicitly DO NOT touch is_min_supported here — that's flipped
     # manually after we confirm the build is healthy.
+    # released_at: do NOT include in the payload. The column is NOT NULL
+    # with default now(); sending null on UPSERT merges null into the
+    # column → constraint violation. Omitting the key lets the default
+    # fire on INSERT and leaves the existing value alone on UPDATE.
     payload = {
         "version": version,
         "platform": platform,
@@ -124,12 +128,14 @@ def main() -> int:
         "sha256": sha,
         "release_notes": release_notes,
         "is_latest": True,
-        "released_at": None,  # default now() takes over when null on insert
     }
+    # on_conflict uses the composite (version, platform) PK from
+    # migration 0029. Without specifying platform here, a Mac job running
+    # for v0.5.9 would MERGE on the Windows v0.5.9 row and overwrite it.
     status, body = call(
         supabase_url, service_key,
         method="POST",
-        path="/rest/v1/agent_releases?on_conflict=version",
+        path="/rest/v1/agent_releases?on_conflict=version,platform",
         body=payload,
         extra_headers={
             "Prefer": "resolution=merge-duplicates,return=representation",
