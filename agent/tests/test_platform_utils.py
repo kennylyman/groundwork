@@ -68,10 +68,16 @@ class PathResolverTests(unittest.TestCase):
             self.assertEqual(p, Path("/custom/xdg") / "groundwork")
 
     def test_linux_config_dir_falls_back_to_dotconfig(self):
+        # mock.patch.dict(clear=True) wipes USERPROFILE / HOMEPATH on the
+        # Windows CI runner, which Path.home() needs there (it can't fall
+        # back to / on Windows the way it can on Mac/Linux). Mock
+        # Path.home() too so the test doesn't depend on whichever
+        # platform's env-var convention the runner uses.
         with mock.patch.object(sys, "platform", "linux"), \
-             mock.patch.dict(os.environ, {}, clear=True):
+             mock.patch.dict(os.environ, {}, clear=True), \
+             mock.patch("pathlib.Path.home", return_value=Path("/home/testuser")):
             p = platform_utils.get_config_dir()
-            self.assertEqual(p, Path.home() / ".config" / "groundwork")
+            self.assertEqual(p, Path("/home/testuser/.config/groundwork"))
 
     def test_log_queue_runtime_paths_derive_from_config(self):
         # Whatever platform we're on, log/queue/runtime should all sit
