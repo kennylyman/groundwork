@@ -86,9 +86,27 @@ jobs:
           tag_name: latest
           name: "Groundwork Agent v${{ steps.version.outputs.version }}"
           body: "Build of agent v${{ steps.version.outputs.version }} from main @ ${{ github.sha }}"
-          files: ${{ steps.exe.outputs.path }}
+          # NOTE: files intentionally omitted. softprops@v1 silently
+          # drops uploads when an asset with the same name already
+          # exists on the release (manifested in 19e02a77: the DB row
+          # said sha=dd27910d but the served binary was still v0.5.8's
+          # sha=8a832624). We use gh CLI --clobber below to force-
+          # replace the asset on every build.
           prerelease: false
           token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Force-upload .exe asset (overwrite)
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # --clobber explicitly deletes the existing asset of the same
+          # name before uploading the new one. softprops/action-gh-release
+          # silently skips on conflict; gh CLI is the only reliable way
+          # to guarantee the binary at /latest/Groundwork.exe matches
+          # what publish-release.py just registered in agent_releases.
+          gh release upload latest "${{ steps.exe.outputs.path }}" \
+            --clobber --repo "${{ github.repository }}"
 
       - name: Register Windows release in Supabase
         shell: bash
@@ -201,9 +219,18 @@ jobs:
           tag_name: latest
           name: "Groundwork Agent v${{ steps.version.outputs.version }}"
           body: "Build of agent v${{ steps.version.outputs.version }} from main @ ${{ github.sha }}"
-          files: ${{ steps.binary.outputs.path }}
+          # files omitted — see comment on the Windows job. softprops
+          # doesn't reliably overwrite existing assets; gh CLI --clobber
+          # below is the only guaranteed path.
           prerelease: false
           token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Force-upload Mac binary (overwrite)
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release upload latest "${{ steps.binary.outputs.path }}" \
+            --clobber --repo "${{ github.repository }}"
 
       - name: Register Mac release in Supabase
         env:
