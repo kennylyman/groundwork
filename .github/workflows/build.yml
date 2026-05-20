@@ -3,6 +3,19 @@ name: Build Groundwork Agent (Windows + Mac)
 on:
   push:
     branches: [ main ]
+    # Only rebuild when something that actually affects the agent binary
+    # has changed. Dashboard-only PRs (lib/*, app/*, components/*) and
+    # supabase migrations don't need a 3-minute Windows + Mac PyInstaller
+    # cycle that also churns SHA256s in agent_releases. Triggered paths:
+    #   - agent/**                — Python source, spec file, tests
+    #   - scripts/publish-release.py — the DB upsert script
+    #   - VERSION                 — bumps that the spec bakes into the binary
+    #   - .github/workflows/build.yml — meta: changes to the workflow itself
+    paths:
+      - 'agent/**'
+      - 'scripts/publish-release.py'
+      - 'VERSION'
+      - '.github/workflows/build.yml'
 
 jobs:
   # ===========================================================================
