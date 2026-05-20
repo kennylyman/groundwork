@@ -47,23 +47,41 @@ function compareVersionTuples(a: number[], b: number[]): number {
   return 0
 }
 
+/** Allowed platform values — matches the CHECK on agent_releases.platform. */
+const PLATFORMS = ['windows', 'mac', 'linux'] as const
+type Platform = (typeof PLATFORMS)[number]
+
+function resolvePlatform(request: NextRequest): Platform {
+  // Header is authoritative when set (agents from v0.5.9+ send it).
+  // Older agents (≤v0.5.8) never sent the header — they're all Windows.
+  // Default 'windows' preserves their behavior with no protocol break.
+  const header = request.headers.get('x-groundwork-platform')?.trim().toLowerCase()
+  if (header && (PLATFORMS as readonly string[]).includes(header)) {
+    return header as Platform
+  }
+  return 'windows'
+}
+
 export async function GET(request: NextRequest) {
   const supabase = serverSupabase()
   const employeeId = request.nextUrl.searchParams.get('employee_id')?.trim()
+  const platform = resolvePlatform(request)
 
-  // Pull latest + min_supported in parallel. Both can legitimately be
-  // missing (fresh deploy, no releases yet) — the agent treats null
-  // versions as "no update available".
+  // Pull latest + min_supported FILTERED BY PLATFORM — each platform has
+  // its own invariant of exactly-one-is_latest and exactly-one-is_min_supported
+  // row. A Mac agent asking for the floor must not see the Windows .exe.
   const [latestRes, minSupportedRes] = await Promise.all([
     supabase
       .from('agent_releases')
       .select('version, download_url, sha256, release_notes')
       .eq('is_latest', true)
+      .eq('platform', platform)
       .maybeSingle(),
     supabase
       .from('agent_releases')
       .select('version')
       .eq('is_min_supported', true)
+      .eq('platform', platform)
       .maybeSingle(),
   ])
 
@@ -81,6 +99,7 @@ export async function GET(request: NextRequest) {
       .from('agent_releases')
       .select('version, download_url, sha256, release_notes')
       .eq('is_canary', true)
+      .eq('platform', platform)
       .contains('canary_employee_ids', [employeeId])
       .order('released_at', { ascending: false })
       .limit(1)
@@ -108,6 +127,11 @@ export async function GET(request: NextRequest) {
       .update({
         agent_version: currentVersion,
         agent_version_updated_at: new Date().toISOString(),
+        // Persist last-reported platform — used by /api/download/[token]
+        // to serve the right binary when the user re-downloads after
+        // re-invite. Stored on every heartbeat to track machine changes
+        // (employee gets a new MacBook, etc.).
+        platform,
       })
       .eq('id', employeeId)
     if (hbErr) {

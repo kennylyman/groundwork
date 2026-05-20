@@ -33,11 +33,40 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { serverSupabase } from '@/lib/supabase'
 
-const RELEASE_URL =
-  'https://github.com/kennylyman/groundwork/releases/latest/download/Groundwork.exe'
-
 export const runtime = 'nodejs'
 export const dynamic = 'force-dynamic'
+
+/** Resolve which binary URL to serve based on platform. Falls back to
+ *  the GitHub `latest` tag for backward compatibility — agents from
+ *  before v0.5.9 don't have platform-specific assets, and the existing
+ *  `Groundwork.exe` URL still points at the freshest Windows build. */
+async function resolveDownloadUrl(
+  supabase: ReturnType<typeof serverSupabase>,
+  platform: 'windows' | 'mac'
+): Promise<string> {
+  const { data: row } = await supabase
+    .from('agent_releases')
+    .select('download_url')
+    .eq('is_latest', true)
+    .eq('platform', platform)
+    .maybeSingle()
+  if (row?.download_url) return row.download_url
+  // Fallback: the GitHub `latest` tag. Always serves the most recent
+  // Windows binary published by build.yml. Used when no platform-
+  // specific row exists yet (e.g. the very first Mac build is still
+  // in CI).
+  return platform === 'mac'
+    ? 'https://github.com/kennylyman/groundwork/releases/latest/download/Groundwork-mac'
+    : 'https://github.com/kennylyman/groundwork/releases/latest/download/Groundwork.exe'
+}
+
+function detectPlatformFromUA(ua: string | null): 'windows' | 'mac' | null {
+  if (!ua) return null
+  const lc = ua.toLowerCase()
+  if (lc.includes('mac os x') || lc.includes('macintosh')) return 'mac'
+  if (lc.includes('windows')) return 'windows'
+  return null
+}
 
 export async function GET(
   request: NextRequest,
@@ -48,7 +77,35 @@ export async function GET(
     return NextResponse.json({ error: 'token required' }, { status: 400 })
   }
 
+  // Platform resolution order:
+  //   1. Explicit ?platform=... query param (set by the install page's
+  //      "Need Mac?" toggle so users can override OS detection)
+  //   2. The employee's most-recently-reported platform on their row
+  //      (when they're re-downloading after a re-invite)
+  //   3. The visitor's User-Agent header
+  //   4. Default to 'windows' (Comfort Keepers' default platform)
+  const queryPlatform = request.nextUrl.searchParams.get('platform')
   const supabase = serverSupabase()
+
+  // Look up the employee row (with their platform) BEFORE atomic claim,
+  // so we know which binary to serve even if the claim fails (we don't
+  // actually need claim success to know the platform).
+  const { data: empRow } = await supabase
+    .from('employees')
+    .select('id, platform')
+    .eq('install_token', token)
+    .maybeSingle()
+  const employeePlatform = empRow?.platform as 'windows' | 'mac' | 'linux' | null
+
+  let platform: 'windows' | 'mac' = 'windows'
+  if (queryPlatform === 'mac' || queryPlatform === 'windows') {
+    platform = queryPlatform
+  } else if (employeePlatform === 'mac' || employeePlatform === 'windows') {
+    platform = employeePlatform
+  } else {
+    const fromUA = detectPlatformFromUA(request.headers.get('user-agent'))
+    if (fromUA) platform = fromUA
+  }
 
   // Atomic claim: only succeeds if install_token_redeemed_at is still
   // null. The .is() filter on the predicate column makes this a single
@@ -77,6 +134,8 @@ export async function GET(
     )
   }
 
-  // We hold the claim. Hand the user off to the binary.
-  return NextResponse.redirect(RELEASE_URL, 302)
+  // We hold the claim. Resolve the appropriate binary for this platform
+  // and hand the user off.
+  const releaseUrl = await resolveDownloadUrl(supabase, platform)
+  return NextResponse.redirect(releaseUrl, 302)
 }

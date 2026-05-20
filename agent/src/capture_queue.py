@@ -37,11 +37,17 @@ from typing import Callable, Optional
 from groundwork_logging import get_logger
 
 
-# Default queue location matches the agent's other on-disk state. The
-# resolver here mirrors main.py's CONFIG_DIR computation so unit tests
-# can override the path without touching env vars.
+# Default queue location matches the agent's other on-disk state.
+# Resolved via platform_utils so the same code works on Windows
+# (%APPDATA%\Groundwork) and macOS (~/Library/Application Support/Groundwork).
+# Tests can still override by passing an explicit db_path to init().
 def default_queue_path() -> Path:
-    return Path(os.environ.get("APPDATA", ".")) / "Groundwork" / "queue.db"
+    # Late import: platform_utils is at the same package depth; this
+    # function is called rarely (once per agent startup) so the import
+    # cost is irrelevant. Late binding keeps capture_queue importable
+    # standalone for unit testing in environments without platform_utils.
+    from platform_utils import get_queue_path
+    return get_queue_path()
 
 
 # Spec-defined limits.

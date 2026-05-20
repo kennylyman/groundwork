@@ -1,6 +1,27 @@
 import { notFound } from 'next/navigation'
+import { headers } from 'next/headers'
 import { serverSupabase } from '@/lib/supabase'
 import { InstallView } from './InstallView'
+
+/** Detect OS from the visitor's User-Agent. Conservative — only commit
+ *  to 'windows' or 'mac' when we're confident; otherwise return 'unknown'
+ *  and the install page shows both download options. */
+function detectPlatformFromUA(ua: string | null): 'windows' | 'mac' | 'unknown' {
+  if (!ua) return 'unknown'
+  const lc = ua.toLowerCase()
+  // Mac check must come first because some Mac browsers also mention
+  // "Windows-like" tokens in the UA string for compatibility.
+  if (lc.includes('mac os x') || lc.includes('macintosh') || lc.includes('mac_powerpc')) {
+    return 'mac'
+  }
+  if (lc.includes('windows') || lc.includes('win64') || lc.includes('win32')) {
+    return 'windows'
+  }
+  // iOS / Android / Linux land here. They can't actually install the
+  // agent (no Windows / Mac binary applies), but we show both options
+  // so they at least know what's available.
+  return 'unknown'
+}
 
 export default async function InstallPage({
   params,
@@ -9,10 +30,16 @@ export default async function InstallPage({
 }) {
   const { token } = await params
 
+  // User-Agent for platform detection. headers() returns a read-only
+  // map; we just need the UA string to feed detectPlatformFromUA.
+  const requestHeaders = await headers()
+  const userAgent = requestHeaders.get('user-agent')
+  const detectedPlatform = detectPlatformFromUA(userAgent)
+
   const { data: employee } = await serverSupabase()
     .from('employees')
     .select(
-      'id, name, role, terms_accepted_at, install_token_redeemed_at, businesses(name)'
+      'id, name, role, terms_accepted_at, install_token_redeemed_at, platform, businesses(name)'
     )
     .eq('install_token', token)
     .single()
@@ -53,6 +80,7 @@ export default async function InstallPage({
             employeeRole={employee.role}
             businessName={businessName}
             initialAccepted={!!employee.terms_accepted_at}
+            detectedPlatform={detectedPlatform}
           />
         )}
       </div>

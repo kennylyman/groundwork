@@ -2,18 +2,31 @@
 """
 Register a freshly built agent release with Supabase.
 
-Called from .github/workflows/build.yml after PyInstaller produces the exe
-and the GitHub Release is published. Computes the exe's SHA256, then calls
-the `promote_agent_release` RPC to insert (or update) the row and flip
-`is_latest = true`.
+Called from .github/workflows/build.yml after PyInstaller produces the
+binary and the GitHub Release is published. Computes SHA256, then
+upserts a row in agent_releases for the (platform, version) pair and
+flips is_latest=true on it (clearing is_latest on all other rows of
+the same platform).
+
+Per-platform invariant: each platform has independent is_latest /
+is_min_supported. The Windows row stays latest for Windows agents even
+when a Mac build promotes its own row to latest for Mac agents.
 
 Env vars (set by GitHub Actions secrets):
   SUPABASE_URL                 — full URL, e.g., https://abc.supabase.co
   SUPABASE_SERVICE_ROLE_KEY    — service-role key (NOT the anon key)
   AGENT_VERSION                — version string read from repo-root VERSION
-  AGENT_EXE_PATH               — path to the built .exe inside dist/
+  AGENT_EXE_PATH               — path to the built binary inside dist/
   AGENT_DOWNLOAD_URL           — GitHub Release asset URL
   AGENT_RELEASE_NOTES          — optional, free-form text
+  AGENT_PLATFORM               — 'windows' | 'mac' | 'linux'. Defaults
+                                  to 'windows' for backward compatibility
+                                  with the prior single-platform build.
+
+Direct PostgREST upsert rather than the promote_agent_release RPC —
+the RPC predates the platform column. Updating its signature would
+require another migration; the direct path is simpler and gives us
+room to add fields without DB changes.
 """
 
 from __future__ import annotations
@@ -42,6 +55,28 @@ def require_env(name: str) -> str:
     return value
 
 
+def call(supabase_url: str, service_key: str, method: str, path: str, body: dict | list | None = None,
+         extra_headers: dict | None = None) -> tuple[int, str]:
+    """Direct PostgREST call returning (status, body_text). Any 4xx/5xx
+    is the caller's problem to interpret — we just print and return."""
+    url = f"{supabase_url}{path}"
+    data = json.dumps(body).encode("utf-8") if body is not None else None
+    headers = {
+        "apikey": service_key,
+        "Authorization": f"Bearer {service_key}",
+        "Content-Type": "application/json",
+    }
+    if extra_headers:
+        headers.update(extra_headers)
+    req = urllib.request.Request(url, method=method, data=data, headers=headers)
+    try:
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            return resp.status, resp.read().decode("utf-8", errors="replace")
+    except urllib.error.HTTPError as e:
+        text = e.read().decode("utf-8", errors="replace")
+        return e.code, text
+
+
 def main() -> int:
     supabase_url = require_env("SUPABASE_URL").rstrip("/")
     service_key = require_env("SUPABASE_SERVICE_ROLE_KEY")
@@ -49,49 +84,62 @@ def main() -> int:
     exe_path = require_env("AGENT_EXE_PATH")
     download_url = require_env("AGENT_DOWNLOAD_URL")
     release_notes = os.environ.get("AGENT_RELEASE_NOTES") or None
+    platform = (os.environ.get("AGENT_PLATFORM") or "windows").strip().lower()
+
+    if platform not in ("windows", "mac", "linux"):
+        sys.stderr.write(f"FATAL: AGENT_PLATFORM must be windows|mac|linux, got {platform!r}\n")
+        return 1
 
     if not os.path.isfile(exe_path):
-        sys.stderr.write(f"FATAL: exe not found at {exe_path}\n")
+        sys.stderr.write(f"FATAL: binary not found at {exe_path}\n")
         return 1
 
     sha = sha256_of_file(exe_path)
+    print(f"platform={platform}")
     print(f"version={version}")
     print(f"sha256={sha}")
     print(f"download_url={download_url}")
 
-    body = {
-        "p_version": version,
-        "p_download_url": download_url,
-        "p_sha256": sha,
-        "p_release_notes": release_notes,
+    # Step 1: clear is_latest on all OTHER rows of the same platform.
+    # PostgREST filter: platform=eq.X&version=not.eq.<version>
+    status, body = call(
+        supabase_url, service_key,
+        method="PATCH",
+        path=f"/rest/v1/agent_releases?platform=eq.{platform}&version=neq.{version}",
+        body={"is_latest": False},
+        extra_headers={"Prefer": "return=minimal"},
+    )
+    if status >= 300:
+        sys.stderr.write(f"clear is_latest failed HTTP {status}: {body}\n")
+        return 1
+
+    # Step 2: upsert the new row. On conflict (version is the PK) we
+    # overwrite download_url, sha256, release_notes, is_latest. We
+    # explicitly DO NOT touch is_min_supported here — that's flipped
+    # manually after we confirm the build is healthy.
+    payload = {
+        "version": version,
+        "platform": platform,
+        "download_url": download_url,
+        "sha256": sha,
+        "release_notes": release_notes,
+        "is_latest": True,
+        "released_at": None,  # default now() takes over when null on insert
     }
-    req = urllib.request.Request(
-        f"{supabase_url}/rest/v1/rpc/promote_agent_release",
+    status, body = call(
+        supabase_url, service_key,
         method="POST",
-        data=json.dumps(body).encode("utf-8"),
-        headers={
-            "apikey": service_key,
-            "Authorization": f"Bearer {service_key}",
-            "Content-Type": "application/json",
+        path="/rest/v1/agent_releases?on_conflict=version",
+        body=payload,
+        extra_headers={
+            "Prefer": "resolution=merge-duplicates,return=representation",
         },
     )
-    try:
-        with urllib.request.urlopen(req, timeout=30) as resp:
-            status = resp.status
-            text = resp.read().decode("utf-8", errors="replace")
-    except urllib.error.HTTPError as e:
-        text = e.read().decode("utf-8", errors="replace")
-        sys.stderr.write(f"HTTPError {e.code}: {text}\n")
-        return 1
-    except Exception as e:
-        sys.stderr.write(f"request failed: {e}\n")
-        return 1
-
     if status >= 300:
-        sys.stderr.write(f"promote_agent_release HTTP {status}: {text}\n")
+        sys.stderr.write(f"upsert agent_releases failed HTTP {status}: {body}\n")
         return 1
 
-    print(f"promote_agent_release ok (HTTP {status})")
+    print(f"agent_releases upsert ok (HTTP {status}): {body[:200]}")
     return 0
 
 

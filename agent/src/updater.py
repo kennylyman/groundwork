@@ -129,7 +129,16 @@ def check_for_update(
         params: dict[str, str] = {"current_version": current_version}
         if employee_id:
             params["employee_id"] = employee_id
-        response = requests.get(url, params=params, timeout=10)
+        # X-Groundwork-Platform tells the server which release row to
+        # return — Mac agents must NOT get the Windows .exe in the
+        # response. Older Windows agents (pre-v0.5.9) never sent this
+        # header; the server defaults to 'windows' for backwards compat.
+        try:
+            from platform_utils import detect_platform
+            headers = {"X-Groundwork-Platform": detect_platform()}
+        except Exception:
+            headers = {}
+        response = requests.get(url, params=params, headers=headers, timeout=10)
         if response.status_code != 200:
             log(f"update check: HTTP {response.status_code} {response.text[:120]}")
             return None

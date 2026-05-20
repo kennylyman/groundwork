@@ -11,6 +11,7 @@ import requests
 import pytz
 
 import capture_queue
+import platform_utils
 from groundwork_logging import configure_logging, get_logger
 
 try:
@@ -42,24 +43,22 @@ _first_heartbeat_succeeded = False
 # completed yet — those reports go anonymous.
 _last_known_config: dict | None = None
 
-CONFIG_DIR = Path(os.environ.get('APPDATA', '.')) / 'Groundwork'
-# NOTE: do NOT call CONFIG_DIR.mkdir() at module level. If APPDATA is
-# read-only / redirected / on a non-existent network share, that mkdir
-# raises before logging is configured and the agent dies with zero
-# observable output. The mkdir now lives in _ensure_config_dir_writable()
-# which runs first thing in main() with a hard-coded fallback log path
-# and a Windows MessageBox on failure.
-LOG_FILE = CONFIG_DIR / 'groundwork.log'
+# Paths resolved through platform_utils so the same constants work on
+# Windows + Mac + Linux. Module-level so existing call sites (LOG_FILE,
+# CONFIG_FILE, QUEUE_DB) stay valid; the actual mkdir lives in
+# _ensure_config_dir_writable() which runs first thing in main() with
+# a hard-coded fallback log path + native dialog on failure.
+CONFIG_DIR = platform_utils.get_config_dir()
+LOG_FILE = platform_utils.get_log_path()
 CONFIG_FILE = CONFIG_DIR / 'config.json'
-QUEUE_DB = CONFIG_DIR / 'queue.db'
+QUEUE_DB = platform_utils.get_queue_path()
 
-# PyInstaller --runtime-tmpdir target. The bootloader extracts to this
-# location BEFORE Python starts; if the bootloader's extraction failed
-# the user already saw a Windows "Failed to load python311.dll" dialog
-# and Python never ran. By the time we reach this constant the dir
-# exists, but we still verify it on every startup in _verify_runtime_dir
-# to catch corruption / AV deletion that happens mid-session.
-RUNTIME_DIR = CONFIG_DIR / 'runtime'
+# PyInstaller --runtime-tmpdir target. On Windows the bootloader expands
+# the env var %APPDATA%\Groundwork\runtime; on Mac --onefile builds the
+# bootloader unpacks to a randomized /var/folders path unless overridden.
+# This constant matches whichever platform we're on so _verify_runtime_directory
+# can check the right location.
+RUNTIME_DIR = platform_utils.get_runtime_dir()
 
 ACTIVATION_URL = os.environ.get(
     'GROUNDWORK_ACTIVATION_URL',
@@ -295,95 +294,47 @@ def load_or_activate_config() -> dict:
 
 
 def install_to_startup() -> bool:
-    """
-    Register this exe in HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run
-    so Windows auto-launches Groundwork on the user's next login.
+    """Register the agent for auto-launch at user login.
 
-    - Only runs on Windows.
-    - Only acts when running as the frozen PyInstaller exe (sys.frozen).
-    - No-op if already pointed at the current exe path.
-    - HKCU (per-user) — no admin needed, scoped to this user's account.
+    Windows: HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run entry
+             pointing at this exe.
+    Mac:     LaunchAgent plist at ~/Library/LaunchAgents/com.groundwork.agent.plist
+             loaded via launchctl.
+    Linux:   No-op (we don't ship a Linux build today).
 
-    Returns True iff the registry entry is now set to this exe path.
-    Returns False when skipped (not Windows / not frozen) or on error,
-    so the caller can decide whether to retry on a later launch.
-    """
-    if sys.platform != 'win32':
-        log("Skipping startup install (not Windows)")
-        return False
+    Only acts when running as the frozen PyInstaller binary
+    (sys.frozen). Returns True iff registration is now in place;
+    False on skip / failure so the caller can choose to retry next
+    launch. Non-fatal — the agent runs this session regardless."""
     if not getattr(sys, 'frozen', False):
-        log("Skipping startup install (not a frozen exe)")
+        log("Skipping startup install (not a frozen build)")
         return False
-
-    try:
-        import winreg  # stdlib on Windows
-    except ImportError as e:
-        log(f"winreg unavailable: {e}")
+    plat = platform_utils.detect_platform()
+    if plat not in ("windows", "mac"):
+        log(f"Skipping startup install (platform={plat})")
         return False
-
-    exe_path = sys.executable
-    run_key = r"Software\Microsoft\Windows\CurrentVersion\Run"
-    value_name = "Groundwork"
-
-    try:
-        with winreg.OpenKey(
-            winreg.HKEY_CURRENT_USER,
-            run_key,
-            0,
-            winreg.KEY_SET_VALUE | winreg.KEY_QUERY_VALUE,
-        ) as key:
-            try:
-                existing, _ = winreg.QueryValueEx(key, value_name)
-                if existing == exe_path:
-                    log("startup registration already present")
-                    return True
-                log(f"updating startup registration: {existing!r} -> {exe_path!r}")
-            except FileNotFoundError:
-                pass
-            winreg.SetValueEx(key, value_name, 0, winreg.REG_SZ, exe_path)
-            log(f"registered Groundwork for startup on login ({exe_path})")
-            return True
-    except Exception as e:
-        # Non-fatal — we still want the agent to run this session even if
-        # the startup hook fails.
-        log(f"Could not write HKCU Run entry: {e}")
-        return False
+    ok = platform_utils.install_to_startup()
+    if ok:
+        log(f"registered Groundwork for startup on login (platform={plat})")
+    else:
+        log(f"startup registration failed (platform={plat})")
+    return ok
 
 
 def uninstall_from_startup() -> bool:
-    """Remove the HKCU Run entry. Called via the --uninstall CLI flag
+    """Reverse of install_to_startup. Called by the --uninstall CLI flag
     when the user is intentionally removing Groundwork. Safe to call
-    when the entry doesn't exist (returns True). Returns False on
-    Windows when the registry write itself fails."""
-    if sys.platform != 'win32':
-        log("Skipping startup uninstall (not Windows)")
+    when no entry exists (idempotent)."""
+    plat = platform_utils.detect_platform()
+    if plat not in ("windows", "mac"):
+        log(f"Skipping startup uninstall (platform={plat})")
         return False
-    try:
-        import winreg  # stdlib on Windows
-    except ImportError as e:
-        log(f"winreg unavailable: {e}")
-        return False
-
-    run_key = r"Software\Microsoft\Windows\CurrentVersion\Run"
-    value_name = "Groundwork"
-
-    try:
-        with winreg.OpenKey(
-            winreg.HKEY_CURRENT_USER,
-            run_key,
-            0,
-            winreg.KEY_SET_VALUE,
-        ) as key:
-            try:
-                winreg.DeleteValue(key, value_name)
-                log("removed Groundwork startup registration")
-                return True
-            except FileNotFoundError:
-                log("no startup registration to remove")
-                return True
-    except Exception as e:
-        log(f"Could not remove HKCU Run entry: {e}")
-        return False
+    ok = platform_utils.uninstall_from_startup()
+    if ok:
+        log(f"removed Groundwork startup registration (platform={plat})")
+    else:
+        log(f"startup uninstall failed (platform={plat})")
+    return ok
 
 
 def _ensure_startup_installed(config: dict) -> None:
@@ -868,31 +819,27 @@ def _ensure_config_dir_writable() -> None:
         probe.unlink()
         return
     except Exception as e:
-        # Build a structured fatal report. Hard-coded path because we can't
-        # trust APPDATA — that's exactly the state we're failing in.
-        fallback_log = Path("C:/Users/Public/Groundwork-error.log")
+        # Build a structured fatal report. Use the platform-appropriate
+        # fallback log path (Public/ on Windows, /tmp on Mac+Linux) so
+        # we have somewhere to write even when CONFIG_DIR is broken.
+        fallback_log = platform_utils.get_fallback_error_log_path()
         try:
-            import platform
+            import platform as _plat
             from datetime import datetime, timezone
             now_iso = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-            win_ver = platform.platform()
+            os_descr = _plat.platform()
             report_lines = [
                 "=" * 60,
                 f"Groundwork fatal startup error (agent v{VERSION})",
                 f"timestamp:  {now_iso}",
-                f"windows:    {win_ver}",
-                f"appdata:    {os.environ.get('APPDATA', '<unset>')}",
+                f"platform:   {platform_utils.detect_platform()} ({os_descr})",
                 f"config_dir: {CONFIG_DIR}",
                 f"exception:  {type(e).__name__}: {e}",
                 "",
             ]
-            try:
-                with open(fallback_log, "a", encoding="utf-8") as f:
-                    f.write("\n".join(report_lines) + "\n")
-            except Exception:
-                # Even the fallback failed. Nothing more we can do but the
-                # MessageBox below.
-                pass
+            # Best-effort write to the fallback log; if even that fails,
+            # the dialog below is the only diagnostic the user gets.
+            platform_utils.write_fallback_error_log("\n".join(report_lines))
         except Exception:
             pass
 
@@ -905,28 +852,14 @@ def _ensure_config_dir_writable() -> None:
         sys.exit(1)
 
 
-def _show_fatal_dialog(message: str) -> None:
-    """Surface a Windows native error dialog so the user sees a clear,
-    actionable message instead of the PyInstaller bootloader's cryptic
-    "Failed to load Python DLL" or a silent exit. Best-effort: any
-    failure to display the dialog is swallowed — we'd rather exit
-    cleanly than crash trying to show the error."""
-    if sys.platform != 'win32':
-        return
+def _show_fatal_dialog(message: str, title: str = "Groundwork") -> None:
+    """Thin compatibility shim around platform_utils.show_fatal_dialog —
+    kept here so existing call sites in this file don't need to change.
+    Best-effort: any failure to display the dialog is swallowed."""
     try:
-        import ctypes
-        MB_OK = 0x00000000
-        MB_ICONERROR = 0x00000010
-        MB_SETFOREGROUND = 0x00010000
-        MB_TOPMOST = 0x00040000
-        ctypes.windll.user32.MessageBoxW(
-            None,
-            message,
-            "Groundwork",
-            MB_OK | MB_ICONERROR | MB_SETFOREGROUND | MB_TOPMOST,
-        )
+        platform_utils.show_fatal_dialog(title, message)
     except Exception:
-        # MessageBox failure is not actionable from inside the process.
+        # Crash reporter must not crash. Continue to the sys.exit below.
         pass
 
 
@@ -1006,6 +939,17 @@ def main() -> None:
     # a broken extraction surfaces a clear Windows dialog instead of a
     # silent crash deeper in the loop.
     _verify_runtime_directory()
+
+    # macOS-only: probe Screen Recording permission BEFORE the capture
+    # loop tries (and fails endlessly). On macOS, an unsigned binary's
+    # first screenshot attempt triggers the system permission prompt;
+    # if denied OR not yet granted, mss raises ScreenShotError. We
+    # show a clear dialog with grant instructions and exit so the user
+    # can grant and relaunch. No-op on Windows / Linux.
+    if platform_utils.detect_platform() == "mac":
+        if not platform_utils.check_mac_screen_recording_permission():
+            platform_utils.show_mac_permission_dialog()
+            sys.exit(1)
 
     log("=" * 60)
     log(f"Groundwork starting (agent v{VERSION})...")
