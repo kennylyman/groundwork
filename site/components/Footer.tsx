@@ -14,7 +14,7 @@ export default function Footer() {
 
         <div className="text-sm">
           <div className="font-mono text-xs uppercase tracking-wider text-ground/50 mb-3">
-            Site
+            Groundwork
           </div>
           <ul className="space-y-2">
             <li><Link href="/agents" className="hover:underline">Agents</Link></li>

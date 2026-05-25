@@ -67,7 +67,7 @@ const agents = [
       "Sends SMS offers",
       "Confirms fills automatically",
     ],
-    stat: "$2-4K/wk in recovered shifts",
+    stat: "Shifts recovered before they cost you",
   },
   {
     name: "ATLAS",

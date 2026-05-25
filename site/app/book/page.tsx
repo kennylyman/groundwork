@@ -13,7 +13,7 @@ export default function BookPage() {
     const data = Object.fromEntries(new FormData(form).entries());
 
     try {
-      const res = await fetch("https://2.24.115.50:8901/intake", {
+      const res = await fetch("/api/intake", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(data),
