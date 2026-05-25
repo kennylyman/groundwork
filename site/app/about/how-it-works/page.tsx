@@ -5,6 +5,7 @@ export const metadata: Metadata = {
   title: "How it works — Groundwork",
   description:
     "From zero to running in weeks, not months. Intake conversation, configuration, supervised launch, handoff.",
+  robots: "noindex, nofollow",
 };
 
 const steps = [
@@ -113,7 +114,7 @@ export default function HowItWorksPage() {
           </p>
           <div className="mt-10">
             <Link
-              href="/book"
+              href="/about/book"
               className="inline-flex items-center bg-bolt text-ground px-6 py-3.5 font-medium hover:brightness-95 transition"
             >
               Start a conversation →

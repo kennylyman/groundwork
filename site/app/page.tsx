@@ -1,369 +1,280 @@
-import Link from "next/link";
+"use client";
 
-const agents = [
-  {
-    name: "REED",
-    domain: "Recruiting",
-    bullets: [
-      "Monitors ATS and runs contact cadences",
-      "Triggers voice screens and advances pipeline",
-      "Fires DocuSign offer letters",
-    ],
-    stat: "90-step hiring checklist, automated",
-  },
-  {
-    name: "EMBER",
-    domain: "Post-hire onboarding",
-    bullets: [
-      "Detects new hires and sets up payroll",
-      "Enrolls in training",
-      "Tracks compliance start dates",
-    ],
-  },
-  {
-    name: "SCOUT",
-    domain: "Compliance",
-    bullets: [
-      "Monitors 1,274 records daily",
-      "Sends 30-day expiration alerts",
-      "Flags lapses before they become liabilities",
-    ],
-    stat: "1,274 records monitored daily",
-  },
-  {
-    name: "MAXWELL",
-    domain: "Billing",
-    bullets: [
-      "Auto-approves clean visits",
-      "Flags exceptions for human review",
-      "Cuts billing time from a full day to 2 hours",
-    ],
-    stat: "1 day → 2 hours",
-  },
-  {
-    name: "IRIS",
-    domain: "Client intake",
-    bullets: [
-      "Follows up on every new lead within 30 minutes",
-      "Runs nurture sequences",
-      "Monitors authorization expiry",
-    ],
-    stat: "< 30 min lead response",
-  },
-  {
-    name: "WALTER",
-    domain: "Referrals",
-    bullets: [
-      "Manages VA coordinators and hospital discharge planners",
-      "Tracks social worker relationships",
-      "Keeps the funnel warm without a human dialing",
-    ],
-  },
-  {
-    name: "FELIX",
-    domain: "Shift fill",
-    bullets: [
-      "Matches open shifts to available caregivers",
-      "Sends SMS offers",
-      "Confirms fills automatically",
-    ],
-    stat: "Shifts recovered before they cost you",
-  },
-  {
-    name: "ATLAS",
-    domain: "Digital marketing",
-    bullets: [
-      "Posts to Facebook and GBP weekly",
-      "Monitors reviews",
-      "Sends weekly marketing pulse report",
-    ],
-  },
-  {
-    name: "BEACON",
-    domain: "EVV & incidents",
-    bullets: [
-      "Monitors missed clock-outs",
-      "Scans caregiver notes for incident keywords",
-      "Escalates the moments that matter",
-    ],
-  },
-  {
-    name: "PENNY",
-    domain: "Payroll prep",
-    bullets: [
-      "Reconciles visit data against payroll system",
-      "Flags discrepancies",
-      "Hands a clean file to whoever runs payroll",
-    ],
-  },
-];
+import { useCallback, useEffect, useRef, useState } from "react";
+import Wordmark from "@/components/Wordmark";
+
+type Role = "john" | "visitor";
+
+type Message = {
+  id: string;
+  role: Role;
+  content: string;
+};
+
+const JOHN_OPENER =
+  "Home care operations eating your team alive? Tell me the one thing that's actually broken right now.";
 
 export default function HomePage() {
-  return (
-    <>
-      {/* HERO */}
-      <section className="relative">
-        <div className="mx-auto max-w-6xl px-6 pt-20 pb-24 md:pt-32 md:pb-32">
-          <h1 className="text-5xl md:text-7xl lg:text-8xl font-bold tracking-tight leading-[0.95]">
-            Your home care agency,
-            <br />
-            <span className="relative inline-block">
-              run by agents.
-              <span
-                aria-hidden="true"
-                className="absolute -bottom-2 left-0 h-3 w-full bg-bolt -z-10"
-                style={{ transform: "skewX(-6deg)" }}
-              />
-            </span>
-          </h1>
+  const [messages, setMessages] = useState<Message[]>(() => [
+    { id: "opener", role: "john", content: JOHN_OPENER },
+  ]);
+  const [input, setInput] = useState("");
+  const [isResponding, setIsResponding] = useState(false);
+  const [signupConfirmed, setSignupConfirmed] = useState(false);
 
-          <p className="mt-10 max-w-2xl text-lg md:text-xl text-ground/75 leading-relaxed">
-            Groundwork deploys a fleet of AI agents across your operations —
-            recruiting, compliance, billing, intake, marketing, and shift fill.
-            They run autonomously. Your team handles the exceptions.
-          </p>
+  const sessionIdRef = useRef<string>("");
+  const scrollRef = useRef<HTMLDivElement | null>(null);
+  const inputRef = useRef<HTMLInputElement | null>(null);
 
-          <div className="mt-10 flex flex-wrap items-center gap-4">
-            <Link
-              href="/how-it-works"
-              className="inline-flex items-center bg-ground text-white px-6 py-3.5 font-medium hover:bg-ground/90 transition-colors"
-            >
-              See how it works →
-            </Link>
-            <Link
-              href="/book"
-              className="inline-flex items-center border border-ground/30 text-ground px-6 py-3.5 font-medium hover:border-ground transition-colors"
-            >
-              Book a conversation
-            </Link>
-          </div>
+  function getSessionId() {
+    if (!sessionIdRef.current) {
+      sessionIdRef.current =
+        typeof crypto !== "undefined" && crypto.randomUUID
+          ? crypto.randomUUID()
+          : `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    }
+    return sessionIdRef.current;
+  }
 
-          <p className="mt-8 font-mono text-xs uppercase tracking-wider text-ground/55">
-            Built at Comfort Keepers #974 in Olympia, WA. Running on live operations.
-          </p>
-        </div>
-      </section>
+  // Auto-scroll to bottom on new content
+  useEffect(() => {
+    const el = scrollRef.current;
+    if (!el) return;
+    el.scrollTo({ top: el.scrollHeight, behavior: "smooth" });
+  }, [messages, isResponding]);
 
-      {/* PROBLEM */}
-      <section className="border-t border-ground/10">
-        <div className="mx-auto max-w-6xl px-6 py-24 md:py-32">
-          <div className="font-mono text-xs uppercase tracking-wider text-ground/60 mb-6">
-            The reality
-          </div>
-          <h2 className="text-4xl md:text-6xl font-bold tracking-tight leading-[1.02]">
-            Every home care agency
-            <br />
-            has the same six problems.
-          </h2>
+  const sendMessage = useCallback(
+    async (text: string) => {
+      const trimmed = text.trim();
+      if (!trimmed || isResponding) return;
+      const sessionId = getSessionId();
 
-          <div className="mt-12 max-w-3xl space-y-5 text-lg leading-relaxed text-ground/80">
-            <p className="font-medium text-ground">We know because we own one.</p>
-            <p>
-              Recruiting pipelines held together by a 90-step manual checklist.
-              1,274 compliance records tracked on spreadsheets and prayer.
-              Leads sitting uncontacted for over a month because intake is swamped.
-              Open shifts costing $2-4K a week because fill is a manual phone tree.
-              Referral sources not getting called because nobody has time on a Tuesday.
-              Marketing that never happens because operations always comes first.
-            </p>
-            <p>
-              These aren't your failures. They're the structural constraints of running
-              a home care agency with a human team. We built a different kind of team.
-            </p>
-          </div>
-        </div>
-      </section>
+      const visitorMsg: Message = {
+        id: `v-${Date.now()}`,
+        role: "visitor",
+        content: trimmed,
+      };
+      const johnId = `j-${Date.now()}`;
+      const johnMsg: Message = { id: johnId, role: "john", content: "" };
 
-      {/* AGENTS */}
-      <section className="bg-ground text-white">
-        <div className="mx-auto max-w-6xl px-6 py-24 md:py-32">
-          <div className="font-mono text-xs uppercase tracking-wider text-white/60 mb-6">
-            The fleet
-          </div>
-          <h2 className="text-4xl md:text-6xl font-bold tracking-tight leading-[1.02]">
-            Ten agents. Each one owns a domain.
-            <br />
-            <span className="text-bolt">None of them take days off.</span>
-          </h2>
+      const nextHistory = [...messages, visitorMsg];
+      setMessages([...nextHistory, johnMsg]);
+      setInput("");
+      setIsResponding(true);
 
-          <div className="mt-16 grid gap-px bg-white/10 md:grid-cols-2">
-            {agents.map((agent) => (
-              <div key={agent.name} className="bg-ground p-8 flex flex-col">
-                <div className="flex items-baseline gap-3">
-                  <h3 className="text-2xl font-bold tracking-tight">{agent.name}</h3>
-                  <span className="font-mono text-xs uppercase tracking-wider text-bolt">
-                    {agent.domain}
-                  </span>
-                </div>
-                <ul className="mt-5 space-y-2 text-white/75 text-sm leading-relaxed">
-                  {agent.bullets.map((b) => (
-                    <li key={b} className="flex gap-2">
-                      <span className="text-bolt mt-1">—</span>
-                      <span>{b}</span>
-                    </li>
-                  ))}
-                </ul>
-                {agent.stat && (
-                  <div className="mt-6 pt-5 border-t border-white/10 font-mono text-xs uppercase tracking-wider text-white/50">
-                    {agent.stat}
-                  </div>
-                )}
-              </div>
-            ))}
-          </div>
+      try {
+        const res = await fetch("/api/chat", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            session_id: sessionId,
+            messages: nextHistory.map((m) => ({
+              role: m.role === "john" ? "assistant" : "user",
+              content: m.content,
+            })),
+          }),
+        });
 
-          <div className="mt-12 text-center">
-            <Link
-              href="/agents"
-              className="inline-flex items-center text-bolt hover:underline font-medium"
-            >
-              See the full fleet →
-            </Link>
-          </div>
-        </div>
-      </section>
+        if (!res.body) {
+          setIsResponding(false);
+          return;
+        }
 
-      {/* SOCIAL PROOF */}
-      <section className="border-t border-ground/10">
-        <div className="mx-auto max-w-6xl px-6 py-24 md:py-32">
-          <div className="font-mono text-xs uppercase tracking-wider text-ground/60 mb-6">
-            Built on real operations
-          </div>
-          <h2 className="text-4xl md:text-6xl font-bold tracking-tight leading-[1.02]">
-            This isn't a demo environment.
-          </h2>
+        const reader = res.body.getReader();
+        const decoder = new TextDecoder();
+        let buffer = "";
 
-          <div className="mt-12 grid md:grid-cols-3 gap-10 md:gap-6">
-            <div className="md:col-span-2 max-w-2xl space-y-5 text-lg leading-relaxed text-ground/80">
-              <p>
-                Groundwork was built inside Comfort Keepers #974 in Olympia, WA —
-                a home care franchise with 91 active caregivers and 62 active clients.
-              </p>
-              <p>
-                The agents are running now. SCOUT monitors 1,274 compliance records daily.
-                ATLAS posts to Facebook and sends a weekly marketing pulse every Monday.
-                REED manages the recruiting pipeline. MAXWELL handles billing.
-              </p>
-              <p>
-                We didn't build Groundwork to sell software. We built it to run our agency.
-                Then we realized every agency owner we talked to had the same problems.
-              </p>
-            </div>
+        outer: while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          buffer += decoder.decode(value, { stream: true });
 
-            <div className="space-y-6">
-              <Stat number="91" label="active caregivers" />
-              <Stat number="62" label="active clients" />
-              <Stat number="1,274" label="compliance records monitored" />
-              <Stat number="24/7" label="agents running" />
-            </div>
-          </div>
-        </div>
-      </section>
+          // Split by SSE event delimiter (\n\n)
+          let idx: number;
+          while ((idx = buffer.indexOf("\n\n")) !== -1) {
+            const rawEvent = buffer.slice(0, idx);
+            buffer = buffer.slice(idx + 2);
 
-      {/* TIERS */}
-      <section className="border-t border-ground/10 bg-bone">
-        <div className="mx-auto max-w-6xl px-6 py-24 md:py-32">
-          <div className="font-mono text-xs uppercase tracking-wider text-ground/60 mb-6">
-            How to work with us
-          </div>
-          <h2 className="text-4xl md:text-6xl font-bold tracking-tight leading-[1.02]">
-            Two ways in.
-          </h2>
+            // Each event may contain multiple data: lines
+            const dataLines = rawEvent
+              .split("\n")
+              .filter((l) => l.startsWith("data:"))
+              .map((l) => l.slice(5).trimStart());
 
-          <div className="mt-16 grid md:grid-cols-2 gap-6">
-            <TierCard
-              name="Done-For-You"
-              price="$300–500 / month"
-              body="We run the agents for you. Your team gets the outputs — compliance monitoring, lead follow-up, billing automation, recruiting support, digital marketing. No technical lift required."
-            />
-            <TierCard
-              name="Done-With-You"
-              price="~$1,000–1,500 / month"
-              body="We set it up together. Includes the full implementation playbook, guided setup, and ongoing support. Your team owns the system at the end."
-              accent
-            />
-          </div>
-
-          <p className="mt-10 max-w-2xl text-ground/70 leading-relaxed">
-            Starting with a small group of agencies — ones where we can be close to the
-            implementation and make sure it works for your specific operation before we
-            scale wider.
-          </p>
-        </div>
-      </section>
-
-      {/* CTA */}
-      <section className="bg-ground text-white">
-        <div className="mx-auto max-w-6xl px-6 py-24 md:py-32">
-          <h2 className="text-4xl md:text-6xl font-bold tracking-tight leading-[1.02]">
-            If you recognize your agency
-            <br />
-            in everything above —
-          </h2>
-
-          <div className="mt-10 max-w-2xl space-y-5 text-lg text-white/75 leading-relaxed">
-            <p>
-              We're not running a sales process. We're having conversations with
-              operators who are tired of the same problems.
-            </p>
-            <p>
-              No demo call required. Tell us about your agency and we'll tell you
-              honestly whether this is a fit.
-            </p>
-          </div>
-
-          <div className="mt-10">
-            <Link
-              href="/book"
-              className="inline-flex items-center bg-bolt text-ground px-6 py-3.5 font-medium hover:brightness-95 transition"
-            >
-              Start a conversation →
-            </Link>
-          </div>
-        </div>
-      </section>
-    </>
+            for (const line of dataLines) {
+              if (line === "[DONE]") {
+                break outer;
+              }
+              try {
+                const obj = JSON.parse(line);
+                if (typeof obj.text === "string") {
+                  setMessages((prev) =>
+                    prev.map((m) =>
+                      m.id === johnId
+                        ? { ...m, content: m.content + obj.text }
+                        : m,
+                    ),
+                  );
+                }
+                if (obj.signup === true) {
+                  setSignupConfirmed(true);
+                }
+              } catch {
+                // Ignore non-JSON data lines
+              }
+            }
+          }
+        }
+      } catch {
+        setMessages((prev) =>
+          prev.map((m) =>
+            m.id === johnId && m.content === ""
+              ? {
+                  ...m,
+                  content:
+                    "Something cut the connection. Try again — or email hello@gwork.tech.",
+                }
+              : m,
+          ),
+        );
+      } finally {
+        setIsResponding(false);
+        requestAnimationFrame(() => inputRef.current?.focus());
+      }
+    },
+    [isResponding, messages],
   );
-}
 
-function Stat({ number, label }: { number: string; label: string }) {
+  function handleSubmit(e: React.FormEvent<HTMLFormElement>) {
+    e.preventDefault();
+    sendMessage(input);
+  }
+
   return (
-    <div>
-      <div className="text-4xl font-bold tracking-tight">{number}</div>
-      <div className="mt-1 font-mono text-xs uppercase tracking-wider text-ground/55">
-        {label}
+    <div
+      className="fixed inset-0 flex flex-col"
+      style={{ background: "var(--ground)", color: "var(--bone)" }}
+    >
+      {/* Header */}
+      <header className="flex items-center justify-between gap-4 px-5 md:px-8 py-4 border-b border-white/5 shrink-0">
+        <div className="text-white">
+          <Wordmark size={22} />
+        </div>
+        <div className="hidden sm:block font-mono text-[10px] md:text-xs uppercase tracking-wider text-white/45 text-right">
+          AI agents that run home care operations
+        </div>
+      </header>
+
+      {/* Conversation */}
+      <div
+        ref={scrollRef}
+        className="flex-1 overflow-y-auto px-4 md:px-8 py-8"
+      >
+        <div className="mx-auto max-w-3xl flex flex-col gap-6">
+          {messages.map((m) =>
+            m.role === "john" ? (
+              <JohnBubble key={m.id} content={m.content} />
+            ) : (
+              <VisitorBubble key={m.id} content={m.content} />
+            ),
+          )}
+          {isResponding &&
+            messages[messages.length - 1]?.role === "john" &&
+            messages[messages.length - 1]?.content === "" && <TypingIndicator />}
+          {signupConfirmed && (
+            <div className="self-start text-sm font-mono text-bolt/90">
+              ✓ Check your email
+            </div>
+          )}
+        </div>
+      </div>
+
+      {/* Input bar */}
+      <div className="shrink-0 border-t border-white/10 bg-ground">
+        <form
+          onSubmit={handleSubmit}
+          className="mx-auto max-w-3xl px-4 md:px-8 py-4 flex items-center gap-3"
+        >
+          <input
+            ref={inputRef}
+            value={input}
+            onChange={(e) => setInput(e.target.value)}
+            disabled={isResponding}
+            placeholder="Type your message..."
+            autoComplete="off"
+            className="flex-1 bg-bone text-ground placeholder-ground/40 px-4 py-3 md:py-3.5 outline-none focus:ring-2 focus:ring-bolt/60 disabled:opacity-60"
+            style={{ fontFamily: "var(--font-sans)" }}
+          />
+          <button
+            type="submit"
+            disabled={isResponding || !input.trim()}
+            aria-label="Send message"
+            className="bg-bolt text-ground px-4 py-3 md:py-3.5 font-bold hover:brightness-95 transition disabled:opacity-40 disabled:cursor-not-allowed"
+          >
+            <span className="block text-lg leading-none">→</span>
+          </button>
+        </form>
       </div>
     </div>
   );
 }
 
-function TierCard({
-  name,
-  price,
-  body,
-  accent = false,
-}: {
-  name: string;
-  price: string;
-  body: string;
-  accent?: boolean;
-}) {
+function JohnBubble({ content }: { content: string }) {
+  return (
+    <div className="flex items-start gap-3 self-start max-w-[88%] md:max-w-[75%]">
+      <div
+        aria-hidden="true"
+        className="shrink-0 w-8 h-8 flex items-center justify-center font-mono text-[10px] font-bold text-ground bg-bolt mt-0.5"
+      >
+        GW
+      </div>
+      <div className="text-bone text-base md:text-lg leading-relaxed whitespace-pre-wrap">
+        {content}
+      </div>
+    </div>
+  );
+}
+
+function VisitorBubble({ content }: { content: string }) {
   return (
     <div
-      className={
-        accent
-          ? "border-2 border-ground p-8 md:p-10 relative bg-bone"
-          : "border border-ground/20 p-8 md:p-10 bg-bone"
-      }
+      className="self-end max-w-[88%] md:max-w-[75%] px-4 py-3 text-bone text-base md:text-[17px] leading-relaxed whitespace-pre-wrap"
+      style={{ background: "#1a1a1a" }}
     >
-      {accent && (
-        <span className="absolute -top-3 left-8 bg-bolt text-ground text-xs font-mono uppercase tracking-wider px-2 py-1">
-          Implementation
-        </span>
-      )}
-      <h3 className="text-2xl font-bold tracking-tight">{name}</h3>
-      <div className="mt-2 text-xl font-mono">{price}</div>
-      <p className="mt-6 text-ground/75 leading-relaxed">{body}</p>
+      {content}
     </div>
+  );
+}
+
+function TypingIndicator() {
+  return (
+    <div className="flex items-start gap-3 self-start">
+      <div
+        aria-hidden="true"
+        className="shrink-0 w-8 h-8 flex items-center justify-center font-mono text-[10px] font-bold text-ground bg-bolt mt-0.5"
+      >
+        GW
+      </div>
+      <div
+        className="flex items-center gap-1.5 px-1 py-2"
+        aria-label="John is typing"
+      >
+        <Dot delay={0} />
+        <Dot delay={150} />
+        <Dot delay={300} />
+      </div>
+    </div>
+  );
+}
+
+function Dot({ delay }: { delay: number }) {
+  return (
+    <span
+      className="inline-block w-1.5 h-1.5 rounded-full bg-bone/60"
+      style={{
+        animation: "gw-pulse 1.2s ease-in-out infinite",
+        animationDelay: `${delay}ms`,
+      }}
+    />
   );
 }

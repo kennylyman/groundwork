@@ -17,10 +17,10 @@ export default function Footer() {
             Groundwork
           </div>
           <ul className="space-y-2">
-            <li><Link href="/agents" className="hover:underline">Agents</Link></li>
-            <li><Link href="/how-it-works" className="hover:underline">How it works</Link></li>
-            <li><Link href="/pricing" className="hover:underline">Pricing</Link></li>
-            <li><Link href="/book" className="hover:underline">Book a conversation</Link></li>
+            <li><Link href="/about/agents" className="hover:underline">Agents</Link></li>
+            <li><Link href="/about/how-it-works" className="hover:underline">How it works</Link></li>
+            <li><Link href="/about/pricing" className="hover:underline">Pricing</Link></li>
+            <li><Link href="/about/book" className="hover:underline">Book a conversation</Link></li>
           </ul>
         </div>
 

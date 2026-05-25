@@ -5,6 +5,7 @@ export const metadata: Metadata = {
   title: "Pricing — Groundwork",
   description:
     "Straightforward pricing. No implementation fees. No annual lock-in.",
+  robots: "noindex, nofollow",
 };
 
 const faqs = [
@@ -109,7 +110,7 @@ export default function PricingPage() {
           </h2>
           <div className="mt-10">
             <Link
-              href="/book"
+              href="/about/book"
               className="inline-flex items-center bg-bolt text-ground px-6 py-3.5 font-medium hover:brightness-95 transition"
             >
               Start a conversation →
@@ -166,7 +167,7 @@ function TierCard({
       </ul>
 
       <Link
-        href="/book"
+        href="/about/book"
         className="mt-10 inline-flex items-center bg-ground text-white px-5 py-3 font-medium hover:bg-ground/90 transition-colors"
       >
         Start with {name} →

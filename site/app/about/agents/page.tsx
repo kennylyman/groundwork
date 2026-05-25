@@ -5,6 +5,7 @@ export const metadata: Metadata = {
   title: "The fleet — Groundwork",
   description:
     "Ten agents. Each one owns a specific operational domain. They run autonomously, escalate when something needs a human, and report to the agency owner every morning.",
+  robots: "noindex, nofollow",
 };
 
 type Agent = {
@@ -197,7 +198,7 @@ export default function AgentsPage() {
           </h2>
           <div className="mt-10">
             <Link
-              href="/book"
+              href="/about/book"
               className="inline-flex items-center bg-bolt text-ground px-6 py-3.5 font-medium hover:brightness-95 transition"
             >
               Start a conversation →

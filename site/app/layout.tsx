@@ -1,12 +1,11 @@
 import type { Metadata } from "next";
 import "./globals.css";
-import Nav from "@/components/Nav";
-import Footer from "@/components/Footer";
+import { ChromeNav, ChromeFooter } from "@/components/Chrome";
 
 export const metadata: Metadata = {
   title: "Groundwork — AI agents that run home care operations",
   description:
-    "Groundwork deploys a fleet of AI agents across recruiting, compliance, billing, intake, marketing, and shift fill. They run autonomously. Your team handles the exceptions.",
+    "Talk to John. He'll tell you what Groundwork's agent fleet would do for your home care operation.",
   metadataBase: new URL("https://gwork.tech"),
   openGraph: {
     title: "Groundwork — AI agents that run home care operations",
@@ -24,9 +23,9 @@ export default function RootLayout({
   return (
     <html lang="en" className="h-full">
       <body className="min-h-full flex flex-col bg-bone text-ground">
-        <Nav />
+        <ChromeNav />
         <main className="flex-1">{children}</main>
-        <Footer />
+        <ChromeFooter />
       </body>
     </html>
   );
