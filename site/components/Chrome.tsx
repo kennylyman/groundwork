@@ -15,3 +15,4 @@ export function ChromeFooter() {
   if (!pathname.startsWith("/about")) return null;
   return <Footer />;
 }
+

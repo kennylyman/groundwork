@@ -1,280 +1,191 @@
-"use client";
-
-import { useCallback, useEffect, useRef, useState } from "react";
+import Link from "next/link";
 import Wordmark from "@/components/Wordmark";
 
-type Role = "john" | "visitor";
-
-type Message = {
-  id: string;
-  role: Role;
-  content: string;
-};
-
-const JOHN_OPENER =
-  "Home care operations eating your team alive? Tell me the one thing that's actually broken right now.";
-
 export default function HomePage() {
-  const [messages, setMessages] = useState<Message[]>(() => [
-    { id: "opener", role: "john", content: JOHN_OPENER },
-  ]);
-  const [input, setInput] = useState("");
-  const [isResponding, setIsResponding] = useState(false);
-  const [signupConfirmed, setSignupConfirmed] = useState(false);
-
-  const sessionIdRef = useRef<string>("");
-  const scrollRef = useRef<HTMLDivElement | null>(null);
-  const inputRef = useRef<HTMLInputElement | null>(null);
-
-  function getSessionId() {
-    if (!sessionIdRef.current) {
-      sessionIdRef.current =
-        typeof crypto !== "undefined" && crypto.randomUUID
-          ? crypto.randomUUID()
-          : `${Date.now()}-${Math.random().toString(36).slice(2)}`;
-    }
-    return sessionIdRef.current;
-  }
-
-  // Auto-scroll to bottom on new content
-  useEffect(() => {
-    const el = scrollRef.current;
-    if (!el) return;
-    el.scrollTo({ top: el.scrollHeight, behavior: "smooth" });
-  }, [messages, isResponding]);
-
-  const sendMessage = useCallback(
-    async (text: string) => {
-      const trimmed = text.trim();
-      if (!trimmed || isResponding) return;
-      const sessionId = getSessionId();
-
-      const visitorMsg: Message = {
-        id: `v-${Date.now()}`,
-        role: "visitor",
-        content: trimmed,
-      };
-      const johnId = `j-${Date.now()}`;
-      const johnMsg: Message = { id: johnId, role: "john", content: "" };
-
-      const nextHistory = [...messages, visitorMsg];
-      setMessages([...nextHistory, johnMsg]);
-      setInput("");
-      setIsResponding(true);
-
-      try {
-        const res = await fetch("/api/chat", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            session_id: sessionId,
-            messages: nextHistory.map((m) => ({
-              role: m.role === "john" ? "assistant" : "user",
-              content: m.content,
-            })),
-          }),
-        });
-
-        if (!res.body) {
-          setIsResponding(false);
-          return;
-        }
-
-        const reader = res.body.getReader();
-        const decoder = new TextDecoder();
-        let buffer = "";
-
-        outer: while (true) {
-          const { done, value } = await reader.read();
-          if (done) break;
-          buffer += decoder.decode(value, { stream: true });
-
-          // Split by SSE event delimiter (\n\n)
-          let idx: number;
-          while ((idx = buffer.indexOf("\n\n")) !== -1) {
-            const rawEvent = buffer.slice(0, idx);
-            buffer = buffer.slice(idx + 2);
-
-            // Each event may contain multiple data: lines
-            const dataLines = rawEvent
-              .split("\n")
-              .filter((l) => l.startsWith("data:"))
-              .map((l) => l.slice(5).trimStart());
-
-            for (const line of dataLines) {
-              if (line === "[DONE]") {
-                break outer;
-              }
-              try {
-                const obj = JSON.parse(line);
-                if (typeof obj.text === "string") {
-                  setMessages((prev) =>
-                    prev.map((m) =>
-                      m.id === johnId
-                        ? { ...m, content: m.content + obj.text }
-                        : m,
-                    ),
-                  );
-                }
-                if (obj.signup === true) {
-                  setSignupConfirmed(true);
-                }
-              } catch {
-                // Ignore non-JSON data lines
-              }
-            }
-          }
-        }
-      } catch {
-        setMessages((prev) =>
-          prev.map((m) =>
-            m.id === johnId && m.content === ""
-              ? {
-                  ...m,
-                  content:
-                    "Something cut the connection. Try again — or email hello@gwork.tech.",
-                }
-              : m,
-          ),
-        );
-      } finally {
-        setIsResponding(false);
-        requestAnimationFrame(() => inputRef.current?.focus());
-      }
-    },
-    [isResponding, messages],
-  );
-
-  function handleSubmit(e: React.FormEvent<HTMLFormElement>) {
-    e.preventDefault();
-    sendMessage(input);
-  }
-
   return (
-    <div
-      className="fixed inset-0 flex flex-col"
-      style={{ background: "var(--ground)", color: "var(--bone)" }}
-    >
-      {/* Header */}
-      <header className="flex items-center justify-between gap-4 px-5 md:px-8 py-4 border-b border-white/5 shrink-0">
-        <div className="text-white">
-          <Wordmark size={22} />
+    <div className="min-h-screen flex flex-col" style={{ background: "var(--bone)", color: "var(--ground)" }}>
+      {/* SECTION 1 — Hero */}
+      <section className="flex-1 flex flex-col items-center justify-center min-h-screen px-6 py-20 text-center">
+        <div className="mb-10">
+          <Wordmark size={48} />
         </div>
-        <div className="hidden sm:block font-mono text-[10px] md:text-xs uppercase tracking-wider text-white/45 text-right">
-          AI agents that run home care operations
-        </div>
-      </header>
 
-      {/* Conversation */}
-      <div
-        ref={scrollRef}
-        className="flex-1 overflow-y-auto px-4 md:px-8 py-8"
-      >
-        <div className="mx-auto max-w-3xl flex flex-col gap-6">
-          {messages.map((m) =>
-            m.role === "john" ? (
-              <JohnBubble key={m.id} content={m.content} />
-            ) : (
-              <VisitorBubble key={m.id} content={m.content} />
-            ),
-          )}
-          {isResponding &&
-            messages[messages.length - 1]?.role === "john" &&
-            messages[messages.length - 1]?.content === "" && <TypingIndicator />}
-          {signupConfirmed && (
-            <div className="self-start text-sm font-mono text-bolt/90">
-              ✓ Check your email
-            </div>
-          )}
-        </div>
-      </div>
-
-      {/* Input bar */}
-      <div className="shrink-0 border-t border-white/10 bg-ground">
-        <form
-          onSubmit={handleSubmit}
-          className="mx-auto max-w-3xl px-4 md:px-8 py-4 flex items-center gap-3"
+        <h1
+          className="font-bold tracking-tight leading-tight mb-6"
+          style={{
+            fontFamily: "var(--font-sans)",
+            fontSize: "clamp(32px, 6vw, 48px)",
+          }}
         >
-          <input
-            ref={inputRef}
-            value={input}
-            onChange={(e) => setInput(e.target.value)}
-            disabled={isResponding}
-            placeholder="Type your message..."
-            autoComplete="off"
-            className="flex-1 bg-bone text-ground placeholder-ground/40 px-4 py-3 md:py-3.5 outline-none focus:ring-2 focus:ring-bolt/60 disabled:opacity-60"
-            style={{ fontFamily: "var(--font-sans)" }}
-          />
-          <button
-            type="submit"
-            disabled={isResponding || !input.trim()}
-            aria-label="Send message"
-            className="bg-bolt text-ground px-4 py-3 md:py-3.5 font-bold hover:brightness-95 transition disabled:opacity-40 disabled:cursor-not-allowed"
+          Two products. One purpose:
+          <br />
+          make AI do the work.
+        </h1>
+
+        <p
+          className="uppercase tracking-widest text-ground/50"
+          style={{ fontFamily: "var(--font-mono)", fontSize: "14px" }}
+        >
+          AI SETUP WIZARDS THAT ACTUALLY BUILD THINGS.
+        </p>
+      </section>
+
+      {/* SECTION 2 — Product Cards */}
+      <section className="px-6 pb-20">
+        <div className="mx-auto max-w-5xl grid grid-cols-1 md:grid-cols-2 gap-0 md:gap-6 items-stretch">
+          {/* Card 1 — Groundwork */}
+          <div
+            className="flex flex-col p-10"
+            style={{
+              background: "var(--ground)",
+              color: "var(--bone)",
+              border: "2px solid var(--ground)",
+              borderRadius: 0,
+            }}
           >
-            <span className="block text-lg leading-none">→</span>
-          </button>
-        </form>
-      </div>
-    </div>
-  );
-}
+            <div
+              className="font-bold uppercase tracking-widest mb-6"
+              style={{ fontFamily: "var(--font-mono)", fontSize: "12px", color: "var(--bone)" }}
+            >
+              GROUNDWORK
+            </div>
 
-function JohnBubble({ content }: { content: string }) {
-  return (
-    <div className="flex items-start gap-3 self-start max-w-[88%] md:max-w-[75%]">
-      <div
-        aria-hidden="true"
-        className="shrink-0 w-8 h-8 flex items-center justify-center font-mono text-[10px] font-bold text-ground bg-bolt mt-0.5"
-      >
-        GW
-      </div>
-      <div className="text-bone text-base md:text-lg leading-relaxed whitespace-pre-wrap">
-        {content}
-      </div>
-    </div>
-  );
-}
+            <h2
+              className="font-bold leading-tight mb-6"
+              style={{ fontFamily: "var(--font-sans)", fontSize: "24px", color: "var(--bone)" }}
+            >
+              AI agent setup wizard
+              <br />
+              for home care agencies.
+            </h2>
 
-function VisitorBubble({ content }: { content: string }) {
-  return (
-    <div
-      className="self-end max-w-[88%] md:max-w-[75%] px-4 py-3 text-bone text-base md:text-[17px] leading-relaxed whitespace-pre-wrap"
-      style={{ background: "#1a1a1a" }}
-    >
-      {content}
-    </div>
-  );
-}
+            <p
+              className="leading-relaxed mb-6 flex-1"
+              style={{ color: "rgba(243,241,234,0.65)", fontSize: "16px" }}
+            >
+              We map your operation,
+              <br />
+              build your agent fleet,
+              <br />
+              hand you the keys.
+            </p>
 
-function TypingIndicator() {
-  return (
-    <div className="flex items-start gap-3 self-start">
-      <div
-        aria-hidden="true"
-        className="shrink-0 w-8 h-8 flex items-center justify-center font-mono text-[10px] font-bold text-ground bg-bolt mt-0.5"
-      >
-        GW
-      </div>
-      <div
-        className="flex items-center gap-1.5 px-1 py-2"
-        aria-label="John is typing"
-      >
-        <Dot delay={0} />
-        <Dot delay={150} />
-        <Dot delay={300} />
-      </div>
-    </div>
-  );
-}
+            <p
+              className="mb-8 leading-relaxed"
+              style={{
+                fontFamily: "var(--font-mono)",
+                fontSize: "11px",
+                color: "rgba(243,241,234,0.45)",
+                letterSpacing: "0.04em",
+              }}
+            >
+              Recruiting. Compliance.
+              <br />
+              Billing. Intake. Scheduling.
+            </p>
 
-function Dot({ delay }: { delay: number }) {
-  return (
-    <span
-      className="inline-block w-1.5 h-1.5 rounded-full bg-bone/60"
-      style={{
-        animation: "gw-pulse 1.2s ease-in-out infinite",
-        animationDelay: `${delay}ms`,
-      }}
-    />
+            <Link
+              href="/groundwork"
+              className="self-start font-bold uppercase tracking-wider transition-opacity hover:opacity-70"
+              style={{
+                fontFamily: "var(--font-mono)",
+                fontSize: "12px",
+                color: "var(--bolt)",
+              }}
+            >
+              Talk to John →
+            </Link>
+          </div>
+
+          {/* Card 2 — Guided */}
+          <div
+            className="flex flex-col p-10"
+            style={{
+              background: "var(--ground)",
+              color: "var(--bone)",
+              border: "2px solid var(--ground)",
+              borderLeft: "3px solid var(--bolt)",
+              borderRadius: 0,
+            }}
+          >
+            <div
+              className="flex items-center justify-between mb-6"
+            >
+              <span
+                className="font-bold uppercase tracking-widest"
+                style={{ fontFamily: "var(--font-mono)", fontSize: "12px", color: "var(--bone)" }}
+              >
+                GUIDED
+              </span>
+              <span style={{ color: "var(--bolt)", fontSize: "16px" }}>⚡</span>
+            </div>
+
+            <h2
+              className="font-bold leading-tight mb-6"
+              style={{ fontFamily: "var(--font-sans)", fontSize: "24px", color: "var(--bone)" }}
+            >
+              AI build wizard for
+              <br />
+              everyone else.
+            </h2>
+
+            <p
+              className="leading-relaxed mb-6 flex-1"
+              style={{ color: "rgba(243,241,234,0.65)", fontSize: "16px" }}
+            >
+              Tell John what you want.
+              <br />
+              He picks the tools, writes
+              <br />
+              the prompts, watches your
+              <br />
+              screen, builds it with you.
+            </p>
+
+            <p
+              className="mb-8 leading-relaxed"
+              style={{
+                fontFamily: "var(--font-mono)",
+                fontSize: "11px",
+                color: "rgba(243,241,234,0.45)",
+                letterSpacing: "0.04em",
+              }}
+            >
+              No code. No tech skills.
+              <br />
+              Just tell him the problem.
+            </p>
+
+            <a
+              href="https://guided.gwork.tech"
+              target="_blank"
+              rel="noopener noreferrer"
+              className="self-start font-bold uppercase tracking-wider transition-opacity hover:opacity-70"
+              style={{
+                fontFamily: "var(--font-mono)",
+                fontSize: "12px",
+                color: "var(--bolt)",
+              }}
+            >
+              Start Building →
+            </a>
+          </div>
+        </div>
+      </section>
+
+      {/* SECTION 3 — Footer */}
+      <footer className="py-8 px-6 text-center">
+        <p
+          style={{
+            fontFamily: "var(--font-mono)",
+            fontSize: "11px",
+            color: "rgba(10,10,10,0.4)",
+            letterSpacing: "0.04em",
+          }}
+        >
+          gwork.tech&nbsp;&nbsp;·&nbsp;&nbsp;2026&nbsp;&nbsp;·&nbsp;&nbsp;hello@gwork.tech
+        </p>
+      </footer>
+    </div>
   );
 }

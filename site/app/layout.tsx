@@ -3,14 +3,12 @@ import "./globals.css";
 import { ChromeNav, ChromeFooter } from "@/components/Chrome";
 
 export const metadata: Metadata = {
-  title: "Groundwork — AI agents that run home care operations",
-  description:
-    "Talk to John. He'll tell you what Groundwork's agent fleet would do for your home care operation.",
+  title: "Groundwork — AI setup wizards that build what you need",
+  description: "Two products. Groundwork sets up AI agent fleets for home care agencies. Guided helps anyone build with AI — no code, no tech skills needed.",
   metadataBase: new URL("https://gwork.tech"),
   openGraph: {
-    title: "Groundwork — AI agents that run home care operations",
-    description:
-      "A fleet of AI agents that autonomously run home care agency operations. Built at Comfort Keepers #974 in Olympia, WA.",
+    title: "Groundwork — AI setup wizards",
+    description: "Two products. One purpose: make AI do the work.",
     url: "https://gwork.tech",
     siteName: "Groundwork",
     type: "website",
